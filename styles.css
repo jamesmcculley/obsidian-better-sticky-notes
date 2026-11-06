@@ -84,6 +84,14 @@
 	margin: 0 2px;
 }
 
+.bsn-edit-fields {
+	display: flex;
+	min-width: 0;
+	flex: 1 1 55%;
+	flex-direction: column;
+	gap: 5px;
+}
+
 .bsn-text,
 .bsn-text-edit {
 	min-width: 0;
@@ -113,6 +121,12 @@
 	min-height: 34px;
 }
 
+.bsn-url-edit {
+	min-height: 30px;
+	font-size: var(--font-ui-smaller, .85em) !important;
+}
+
+.bsn-external,
 .bsn-edit,
 .bsn-order,
 .bsn-delete,
@@ -121,7 +135,20 @@
 	opacity: .72;
 }
 
+.bsn-external:disabled {
+	opacity: .3;
+	cursor: not-allowed;
+}
+
+.bsn-edit,
+.bsn-external {
+	min-width: 32px;
+	min-height: 32px;
+	padding: 3px 8px;
+}
+
 .bsn-edit:hover,
+.bsn-external:hover,
 .bsn-order:hover,
 .bsn-delete:hover,
 .bsn-move-date:hover,
@@ -157,6 +184,7 @@
 }
 
 @media (hover: none) {
+	.bsn-external,
 	.bsn-edit,
 	.bsn-order,
 	.bsn-delete,

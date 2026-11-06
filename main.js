@@ -31,6 +31,28 @@ function localStamp(date = /* @__PURE__ */ new Date()) {
   const p = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())} ${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}`;
 }
+function normalizeDoneStamp(value) {
+  if (!value) return void 0;
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value} 00:00:00` : value;
+}
+function stampTime(value) {
+  var _a, _b, _c;
+  if (!value) return 0;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}):(\d{2}))?$/);
+  if (!match) return 0;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number((_a = match[4]) != null ? _a : 0), Number((_b = match[5]) != null ? _b : 0), Number((_c = match[6]) != null ? _c : 0)).getTime();
+}
+function isSafeExternalURL(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch (e) {
+    return false;
+  }
+}
+function newTaskId() {
+  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
 function dayId(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
@@ -44,21 +66,25 @@ function noteTitle(period, date) {
   return date.toLocaleDateString(void 0, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 function parseLine(raw, line) {
-  let m = raw.match(/^\s*- \[([ xX])\]\s+(.*)$/);
-  if (m) return entryFromMatch(m[2], line, "check", m[1].toLowerCase() === "x");
-  m = raw.match(/^\s*- \(([ xX])\)\s+(.*)$/);
-  if (m) return entryFromMatch(m[2], line, "task", m[1].toLowerCase() === "x");
-  m = raw.match(/^\s*- (?!\[|\()(.*)$/);
-  if (m) return { line, kind: "bullet", text: m[1], done: false };
+  var _a;
+  const idMatch = raw.match(/\s+<!-- bsn-id:([\w-]+) -->\s*$/);
+  const id = (_a = idMatch == null ? void 0 : idMatch[1]) != null ? _a : "";
+  const parseable = raw.replace(/\s+<!-- bsn-id:[\w-]+ -->\s*$/, "");
+  let m = parseable.match(/^\s*- \[([ xX])\]\s+(.*)$/);
+  if (m) return entryFromMatch(m[2], line, id, "check", m[1].toLowerCase() === "x");
+  m = parseable.match(/^\s*- \(([ xX])\)\s+(.*)$/);
+  if (m) return entryFromMatch(m[2], line, id, "task", m[1].toLowerCase() === "x");
+  m = parseable.match(/^\s*- (?!\[|\()(.*)$/);
+  if (m) return { line, id, kind: "bullet", text: m[1], done: false };
   return null;
 }
-function entryFromMatch(value, line, kind, done) {
+function entryFromMatch(value, line, id, kind, done) {
   const dm = value.match(/\s+@done\((\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}:\d{2})?)\)\s*$/);
-  return { line, kind, text: value.replace(/\s+@done\([^)]*\)\s*$/, ""), done, doneDate: dm == null ? void 0 : dm[1] };
+  return { line, id, kind, text: value.replace(/\s+@done\([^)]*\)\s*$/, ""), done, doneDate: dm == null ? void 0 : dm[1] };
 }
 function encodeEntry(entry, text, done, stamp) {
   const marker = entry.kind === "check" ? done ? "- [x] " : "- [ ] " : entry.kind === "task" ? done ? "- (x) " : "- ( ) " : "- ";
-  return marker + text + (done && stamp ? ` @done(${stamp})` : "");
+  return marker + text + (done && stamp ? ` @done(${stamp})` : "") + (entry.id ? ` <!-- bsn-id:${entry.id} -->` : "");
 }
 function displayEntryText(text) {
   return text.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\]\]/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
@@ -67,6 +93,14 @@ function safeFolder(value) {
   const parts = value.trim().replace(/\\/g, "/").split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === "." || part === ".." || part.startsWith("."))) throw new Error("Choose a visible folder path inside the vault.");
   return parts.join("/");
+}
+function markdownBodyStart(lines) {
+  var _a;
+  if (((_a = lines[0]) == null ? void 0 : _a.trim()) !== "---") return 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "---" || lines[i].trim() === "...") return i + 1;
+  }
+  return lines.length;
 }
 var VaultNotes = class {
   constructor(app, getRoot) {
@@ -101,14 +135,183 @@ var VaultNotes = class {
     if (existing instanceof import_obsidian.TFile) return existing;
     return this.app.vault.create(path, "# Logbook\n");
   }
+  isWeeklyNote(file) {
+    return file.path.startsWith(`${this.getRoot()}/Weekly/`);
+  }
   async entries(file) {
+    const trackTasks = this.isWeeklyNote(file);
+    if (trackTasks) {
+      await this.app.vault.process(file, (data2) => {
+        var _a;
+        const lines2 = data2.split("\n");
+        const bodyStart2 = markdownBodyStart(lines2);
+        let changed = false;
+        for (let i = bodyStart2; i < lines2.length; i++) {
+          let entry = parseLine(lines2[i], i);
+          if (!entry) continue;
+          let entryChanged = false;
+          if (!entry.id) {
+            entry = { ...entry, id: newTaskId() };
+            entryChanged = true;
+          }
+          if (entry.done && !entry.doneDate || entry.doneDate && /^\d{4}-\d{2}-\d{2}$/.test(entry.doneDate)) {
+            entry = { ...entry, doneDate: (_a = normalizeDoneStamp(entry.doneDate)) != null ? _a : localStamp() };
+            entryChanged = true;
+          }
+          if (entryChanged) {
+            lines2[i] = encodeEntry(entry, entry.text, entry.done, entry.doneDate);
+            changed = true;
+          }
+        }
+        return changed ? lines2.join("\n") : data2;
+      });
+    }
     const data = await this.app.vault.read(file);
-    return data.split("\n").map((line, i) => parseLine(line, i)).filter((x) => x !== null);
+    const lines = data.split("\n");
+    const bodyStart = markdownBodyStart(lines);
+    const entries = lines.map((line, i) => i < bodyStart ? null : parseLine(line, i)).filter((x) => x !== null);
+    return this.syncFrontmatter(file, entries, trackTasks);
+  }
+  async syncFrontmatter(file, entries, trackTasks) {
+    const now = localStamp();
+    const fileWeek = /^\d{4}-\d{2}-\d{2}$/.test(file.basename) ? file.basename : dayId(new Date(file.stat.ctime));
+    const weekLink = trackTasks ? await this.weekLink(file) : void 0;
+    const metadata = /* @__PURE__ */ new Map();
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      let changed = false;
+      const oldTasks = trackTasks && Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+      const nextTasks = trackTasks ? entries.filter((entry) => entry.kind !== "bullet").map((entry) => {
+        var _a, _b;
+        const old = oldTasks.find((task2) => task2.id === entry.id);
+        const task = { ...old != null ? old : {} };
+        const status = entry.done ? "done" : "open";
+        const done = entry.done ? (_b = (_a = normalizeDoneStamp(entry.doneDate)) != null ? _a : old == null ? void 0 : old.done) != null ? _b : now : void 0;
+        const coreChanged = !old || old.title !== entry.text || old.status !== status || old.done !== done || old.week_of !== weekLink;
+        task.id = entry.id;
+        task.title = entry.text;
+        task.status = status;
+        task.created = typeof (old == null ? void 0 : old.created) === "string" ? old.created : now;
+        task.start = typeof (old == null ? void 0 : old.start) === "string" ? old.start : `${fileWeek} 00:00:00`;
+        task.last_modified = coreChanged ? now : typeof (old == null ? void 0 : old.last_modified) === "string" ? old.last_modified : now;
+        task.week_of = weekLink;
+        if (done) task.done = done;
+        else delete task.done;
+        if (typeof (old == null ? void 0 : old.external_url) === "string") task.external_url = old.external_url;
+        else delete task.external_url;
+        metadata.set(entry.id, task);
+        return task;
+      }) : [];
+      const metadataChanged = JSON.stringify(oldTasks) !== JSON.stringify(nextTasks);
+      const noteCreated = typeof frontmatter.created === "string" ? frontmatter.created : localStamp(new Date(file.stat.ctime || Date.now()));
+      const oldStart = typeof frontmatter.start === "string" ? frontmatter.start : `${fileWeek} 00:00:00`;
+      const actionable = entries.filter((entry) => entry.kind !== "bullet");
+      const allDone = actionable.length > 0 && actionable.every((entry) => entry.done);
+      const doneStamps = actionable.map((entry) => normalizeDoneStamp(entry.doneDate)).filter((value) => !!value).sort();
+      const latestDone = doneStamps[doneStamps.length - 1];
+      if (frontmatter.created !== noteCreated) {
+        frontmatter.created = noteCreated;
+        changed = true;
+      }
+      if (frontmatter.start !== oldStart) {
+        frontmatter.start = oldStart;
+        changed = true;
+      }
+      if (trackTasks && metadataChanged) {
+        frontmatter.bsn_tasks = nextTasks;
+        changed = true;
+      }
+      const noteStatus = allDone ? "done" : actionable.length ? "open" : "empty";
+      if (frontmatter.status !== noteStatus) {
+        frontmatter.status = noteStatus;
+        changed = true;
+      }
+      if (weekLink && frontmatter.week_of !== weekLink) {
+        frontmatter.week_of = weekLink;
+        changed = true;
+      }
+      if (allDone && latestDone) {
+        if (frontmatter.done !== latestDone) {
+          frontmatter.done = latestDone;
+          changed = true;
+        }
+      } else if (frontmatter.done !== void 0) {
+        delete frontmatter.done;
+        changed = true;
+      }
+      const recordedModified = typeof frontmatter.last_modified === "string" ? frontmatter.last_modified : "";
+      const diskModified = localStamp(new Date(file.stat.mtime || Date.now()));
+      const lastModified = changed ? now : stampTime(diskModified) > stampTime(recordedModified) ? diskModified : recordedModified || now;
+      if (frontmatter.last_modified !== lastModified) {
+        frontmatter.last_modified = lastModified;
+        changed = true;
+      }
+    });
+    return entries.map((entry) => {
+      const task = metadata.get(entry.id);
+      return task ? { ...entry, metadata: task, externalUrl: task.external_url } : entry;
+    });
+  }
+  async updateExternalUrl(file, entry, value) {
+    const url = value.trim();
+    if (url && !isSafeExternalURL(url)) throw new Error("Use an http:// or https:// link.");
+    const stamp = localStamp();
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const tasks = Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+      const task = tasks.find((item) => item.id === entry.id);
+      if (!task) throw new Error("Task metadata is missing. Refresh and try again.");
+      if (url) task.external_url = url;
+      else delete task.external_url;
+      task.last_modified = stamp;
+      frontmatter.last_modified = stamp;
+    });
+  }
+  async setForwarded(file, entry, targetLink, stamp) {
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const tasks = Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+      const task = tasks.find((item) => item.id === entry.id);
+      if (!task) throw new Error("Task metadata is missing while forwarding.");
+      const forwarded = Array.isArray(task.forwarded_to) ? task.forwarded_to : [];
+      if (!forwarded.includes(targetLink)) forwarded.push(targetLink);
+      task.forwarded_to = forwarded;
+      task.last_modified = stamp;
+      frontmatter.last_modified = stamp;
+    });
+  }
+  async copyTaskMetadata(entry, destination, sourcePath, carryForward = true) {
+    const stamp = localStamp();
+    const link = await this.weekLink(destination);
+    await this.app.fileManager.processFrontMatter(destination, (frontmatter) => {
+      var _a, _b, _c, _d, _e, _f, _g, _h;
+      const tasks = Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+      const source = entry.metadata;
+      const status = carryForward ? "open" : entry.done ? "done" : "open";
+      const done = carryForward ? void 0 : entry.done ? (_a = normalizeDoneStamp(entry.doneDate)) != null ? _a : source == null ? void 0 : source.done : void 0;
+      let task = tasks.find((item) => item.id === entry.id);
+      if (!task) {
+        task = { id: entry.id, title: entry.text, status, created: (_b = source == null ? void 0 : source.created) != null ? _b : stamp, start: (_c = source == null ? void 0 : source.start) != null ? _c : stamp, last_modified: stamp, week_of: link };
+        tasks.push(task);
+      } else {
+        (_e = task.created) != null ? _e : task.created = (_d = source == null ? void 0 : source.created) != null ? _d : stamp;
+        (_g = task.start) != null ? _g : task.start = (_f = source == null ? void 0 : source.start) != null ? _f : stamp;
+        task.week_of = link;
+      }
+      task.title = entry.text;
+      task.status = status;
+      if (done) task.done = done;
+      else delete task.done;
+      if (!task.external_url && (entry.externalUrl || (source == null ? void 0 : source.external_url))) task.external_url = entry.externalUrl || (source == null ? void 0 : source.external_url);
+      (_h = task.carried_from) != null ? _h : task.carried_from = sourcePath;
+      frontmatter.bsn_tasks = tasks;
+      frontmatter.last_modified = stamp;
+    });
   }
   async title(file) {
     var _a, _b;
     const heading = (_b = (_a = (await this.app.vault.read(file)).match(/^#\s+(.+)$/m)) == null ? void 0 : _a[1]) == null ? void 0 : _b.trim();
     return heading || file.basename;
+  }
+  async weekLink(file) {
+    return `[[${file.path.replace(/\.md$/i, "")}|${await this.title(file)}]]`;
   }
   async updateLine(file, entry, update) {
     await this.app.vault.process(file, (data) => {
@@ -121,7 +324,7 @@ var VaultNotes = class {
   }
 };
 function sameEntry(current, expected) {
-  return !!current && current.kind === expected.kind && current.text === expected.text && current.done === expected.done && current.doneDate === expected.doneDate;
+  return !!current && current.id === expected.id && current.kind === expected.kind && current.text === expected.text && current.done === expected.done && current.doneDate === expected.doneDate;
 }
 var BetterStickyNotes = class extends import_obsidian.Plugin {
   constructor() {
@@ -204,6 +407,40 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     this.app.workspace.revealLeaf(leaf);
     return true;
   }
+  async forwardPreviousWeek(file, date) {
+    var _a, _b;
+    const currentWeek = monday(date);
+    if (dayId(currentWeek) !== dayId(monday(/* @__PURE__ */ new Date()))) return;
+    const previousWeek = new Date(currentWeek);
+    previousWeek.setDate(previousWeek.getDate() - 7);
+    const previousPath = this.notes.path("Weekly", `${dayId(previousWeek)}.md`);
+    const previous = this.app.vault.getAbstractFileByPath(previousPath);
+    if (!(previous instanceof import_obsidian.TFile)) return;
+    const targetLink = await this.notes.weekLink(file);
+    const sourceEntries = await this.notes.entries(previous);
+    const destinationEntries = await this.notes.entries(file);
+    for (const entry of sourceEntries) {
+      if (entry.kind === "bullet" || entry.done) continue;
+      const forwarded = (_b = (_a = entry.metadata) == null ? void 0 : _a.forwarded_to) != null ? _b : [];
+      const alreadyForwarded = forwarded.includes(targetLink);
+      const stamp = localStamp();
+      if (!alreadyForwarded) {
+        if (!destinationEntries.some((candidate) => candidate.id === entry.id)) {
+          await this.app.vault.process(file, (content) => `${content}${content.endsWith("\n") ? "" : "\n"}${encodeEntry(entry, entry.text, false)}
+`);
+        }
+        await this.notes.copyTaskMetadata(entry, file, previous.path);
+        await this.notes.setForwarded(previous, entry, targetLink, stamp);
+      }
+      const marker = `<!-- bsn-forwarded:${entry.id}:${dayId(currentWeek)} -->`;
+      await this.app.vault.process(previous, (content) => {
+        if (content.includes(marker)) return content;
+        const taskText = entry.text.replace(/[\r\n]+/g, " ");
+        return `${content}${content.endsWith("\n") ? "" : "\n"}> Forwarded \u201C${taskText}\u201D to ${targetLink} on ${stamp}. ${marker}
+`;
+      });
+    }
+  }
   async complete(file, entry) {
     if (entry.kind === "bullet") return;
     if (!entry.done) {
@@ -235,21 +472,24 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
       return line.replace(`${oldText} \u2014 ${source}`, `${newText} \u2014 ${destination}`);
     }).join("\n"));
   }
-  async editEntry(file, entry, value) {
+  async editEntry(file, entry, value, externalUrl) {
+    if ((externalUrl == null ? void 0 : externalUrl.trim()) && !isSafeExternalURL(externalUrl.trim())) throw new Error("Use an http:// or https:// link.");
     await this.notes.updateLine(file, entry, () => encodeEntry(entry, value, entry.done, entry.doneDate));
     if (entry.done && entry.doneDate) {
       const title = await this.notes.title(file);
       await this.replaceLogbookTitle(entry.text, value, title, title, entry.doneDate);
     }
+    if (externalUrl !== void 0) await this.notes.updateExternalUrl(file, entry, externalUrl);
   }
   async reorderEntry(file, entry, direction) {
     await this.app.vault.process(file, (data) => {
       var _a;
       const lines = data.split("\n");
+      const bodyStart = markdownBodyStart(lines);
       if (!sameEntry(parseLine((_a = lines[entry.line]) != null ? _a : "", entry.line), entry)) throw new Error("This note changed outside the plugin. Refresh and try again.");
       let target = entry.line + direction;
-      while (target >= 0 && target < lines.length && !parseLine(lines[target], target)) target += direction;
-      if (target < 0 || target >= lines.length) return data;
+      while (target >= bodyStart && target < lines.length && !parseLine(lines[target], target)) target += direction;
+      if (target < bodyStart || target >= lines.length) return data;
       [lines[entry.line], lines[target]] = [lines[target], lines[entry.line]];
       return lines.join("\n");
     });
@@ -291,6 +531,7 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
 ` : `${data}
 ${line}
 `);
+    if (entry.kind !== "bullet") await this.notes.copyTaskMetadata(entry, target, file.path, false);
     await this.app.vault.process(file, (data) => {
       var _a;
       const lines = data.split("\n");
@@ -351,6 +592,7 @@ var StickyView = class extends import_obsidian.ItemView {
       void this.render();
     };
     const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote("weekly", this.plugin.viewingDate);
+    if (!this.plugin.logbook) await this.plugin.forwardPreviousWeek(file, this.plugin.viewingDate);
     const entries = await this.plugin.notes.entries(file);
     const list = root.createDiv({ cls: "bsn-list" });
     for (const entry of entries) this.renderEntry(list, file, entry);
@@ -380,6 +622,7 @@ var StickyView = class extends import_obsidian.ItemView {
     }
   }
   renderEntry(parent, file, entry) {
+    var _a;
     const key = `${file.path}:${entry.line}`;
     const editing = !this.plugin.logbook && this.editingKey === key;
     const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}${editing ? " is-editing" : ""}` });
@@ -391,15 +634,28 @@ var StickyView = class extends import_obsidian.ItemView {
       check.onchange = () => void this.runEntryAction(file, entry, (current) => this.plugin.complete(file, current), input);
     }
     if (editing) {
-      input = row.createEl("input", { cls: "bsn-text-edit", type: "text" });
+      const fields = row.createDiv({ cls: "bsn-edit-fields" });
+      input = fields.createEl("input", { cls: "bsn-text-edit", type: "text" });
       input.value = entry.text;
+      const urlInput = fields.createEl("input", { cls: "bsn-url-edit", type: "url", attr: { placeholder: "External URL (optional)" } });
+      urlInput.value = (_a = entry.externalUrl) != null ? _a : "";
       input.onkeydown = (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
-          this.finishEdit(file, entry, input);
+          this.finishEdit(file, entry, input, urlInput);
         }
         if (event.key === "Escape") {
           input.value = entry.text;
+          this.editingKey = void 0;
+          void this.render();
+        }
+      };
+      urlInput.onkeydown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this.finishEdit(file, entry, input, urlInput);
+        }
+        if (event.key === "Escape") {
           this.editingKey = void 0;
           void this.render();
         }
@@ -420,10 +676,20 @@ var StickyView = class extends import_obsidian.ItemView {
         }
       };
     }
+    if (entry.kind !== "bullet" && !this.plugin.logbook) {
+      const external = row.createEl("button", { text: "\u2197", cls: "bsn-external", attr: { type: "button", "aria-label": "Open external task link" } });
+      const url = entry.externalUrl;
+      external.disabled = !url || !isSafeExternalURL(url);
+      external.title = external.disabled ? "Add an http(s) URL while editing" : "Open external link in your browser";
+      if (url && !external.disabled) external.onclick = () => {
+        window.open(url, "_blank", "noopener,noreferrer");
+      };
+    }
     if (!this.plugin.logbook) {
       const pencil = row.createEl("button", { text: "\u270E", cls: "bsn-edit", attr: { type: "button", "aria-label": editing ? "Finish editing" : "Edit item" } });
       pencil.onclick = () => {
-        if (editing && input) this.finishEdit(file, entry, input);
+        var _a2;
+        if (editing && input) this.finishEdit(file, entry, input, (_a2 = row.querySelector(".bsn-url-edit")) != null ? _a2 : void 0);
         else {
           this.editingKey = key;
           void this.render();
@@ -444,24 +710,38 @@ var StickyView = class extends import_obsidian.ItemView {
       }
     }
   }
-  finishEdit(file, entry, input) {
+  finishEdit(file, entry, input, urlInput) {
+    var _a, _b;
     const value = input.value.trim();
     if (!value) {
       new import_obsidian.Notice("An item cannot be empty.");
       input.focus();
       return;
     }
+    const externalUrl = (_b = (_a = urlInput == null ? void 0 : urlInput.value.trim()) != null ? _a : entry.externalUrl) != null ? _b : "";
+    if (externalUrl && !isSafeExternalURL(externalUrl)) {
+      new import_obsidian.Notice("Use an http:// or https:// link.");
+      urlInput == null ? void 0 : urlInput.focus();
+      return;
+    }
     this.editingKey = void 0;
-    void this.plugin.run(() => value === entry.text ? Promise.resolve() : this.plugin.editEntry(file, entry, value));
+    void this.plugin.run(() => {
+      var _a2;
+      return value === entry.text && externalUrl === ((_a2 = entry.externalUrl) != null ? _a2 : "") ? Promise.resolve() : this.plugin.editEntry(file, entry, value, externalUrl);
+    });
   }
   runEntryAction(file, entry, action, input) {
     return this.plugin.run(async () => {
+      var _a, _b, _c, _d, _e;
       let current = entry;
-      if (input && input.value.trim() !== entry.text) {
-        const value = input.value.trim();
+      const urlInput = (_a = input == null ? void 0 : input.parentElement) == null ? void 0 : _a.querySelector(".bsn-url-edit");
+      const value = (_b = input == null ? void 0 : input.value.trim()) != null ? _b : entry.text;
+      const externalUrl = (_d = (_c = urlInput == null ? void 0 : urlInput.value.trim()) != null ? _c : entry.externalUrl) != null ? _d : "";
+      if (externalUrl && !isSafeExternalURL(externalUrl)) throw new Error("Use an http:// or https:// link.");
+      if (input && (value !== entry.text || externalUrl !== ((_e = entry.externalUrl) != null ? _e : ""))) {
         if (!value) throw new Error("An item cannot be empty.");
-        await this.plugin.editEntry(file, entry, value);
-        current = { ...entry, text: value };
+        await this.plugin.editEntry(file, entry, value, externalUrl);
+        current = { ...entry, text: value, externalUrl: externalUrl || void 0 };
       }
       this.editingKey = void 0;
       await action(current);

@@ -1,7 +1,7 @@
 {
   "id": "better-sticky-notes",
   "name": "Better Sticky Notes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
   "description": "Open daily and weekly Markdown notes in a compact task view.",
   "isDesktopOnly": false
