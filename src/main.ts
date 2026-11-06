@@ -28,6 +28,8 @@ interface TaskMetadata {
 	external_url?: string;
 	forwarded_to?: string[];
 	carried_from?: string;
+	related_note?: string;
+	source_week?: string;
 	[key: string]: unknown;
 }
 const DEFAULT_SETTINGS: Settings = { folder: DEFAULT_ROOT };
@@ -269,6 +271,66 @@ class VaultNotes {
 			frontmatter.last_modified = stamp;
 		});
 	}
+	async setRelatedNote(file: TFile, id: string, path?: string): Promise<void> {
+		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+			const tasks: TaskMetadata[] = Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+			const task = tasks.find((item) => item.id === id);
+			if (!task || task.related_note === path) return;
+			if (path) task.related_note = path; else delete task.related_note;
+			task.last_modified = localStamp();
+			frontmatter.last_modified = task.last_modified;
+		});
+	}
+	async syncRelatedTask(target: TFile, source: TFile, entry: Entry): Promise<void> {
+		const task = entry.metadata;
+		if (!task) return;
+		const record: TaskMetadata = {
+			id: entry.id,
+			title: entry.text,
+			status: entry.done ? "done" : "open",
+			created: task.created,
+			start: task.start,
+			last_modified: task.last_modified,
+			week_of: task.week_of,
+			source_week: source.path,
+			...(entry.done ? { done: normalizeDoneStamp(entry.doneDate) ?? task.done } : {}),
+			...(entry.externalUrl ? { external_url: entry.externalUrl } : {}),
+		};
+		await this.app.fileManager.processFrontMatter(target, (frontmatter) => {
+			let changed = false;
+			const related: TaskMetadata[] = Array.isArray(frontmatter.bsn_related_tasks) ? frontmatter.bsn_related_tasks : [];
+			const old = related.find((item) => item.id === entry.id && item.source_week === source.path);
+			if (!old) { related.push(record); changed = true; }
+			else {
+				const oldFields = old as Record<string, unknown>;
+				const newFields = record as Record<string, unknown>;
+				for (const field of ["title", "status", "created", "start", "last_modified", "week_of", "done", "external_url"]) {
+					const value = newFields[field];
+					if (value === undefined) {
+						if (oldFields[field] !== undefined) { delete oldFields[field]; changed = true; }
+					} else if (oldFields[field] !== value) { oldFields[field] = value; changed = true; }
+				}
+			}
+			if (changed) {
+				frontmatter.bsn_related_tasks = related;
+				frontmatter.last_modified = localStamp();
+			}
+			if (!frontmatter.created) frontmatter.created = localStamp(new Date(target.stat.ctime || Date.now()));
+			if (!frontmatter.start) frontmatter.start = record.start;
+			if (!frontmatter.last_modified) frontmatter.last_modified = localStamp();
+		});
+	}
+	async removeRelatedTask(path: string, id: string, sourceWeek: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return;
+		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+			const related: TaskMetadata[] = Array.isArray(frontmatter.bsn_related_tasks) ? frontmatter.bsn_related_tasks : [];
+			const next = related.filter((item) => !(item.id === id && item.source_week === sourceWeek));
+			if (next.length === related.length) return;
+			frontmatter.bsn_related_tasks = next;
+			frontmatter.last_modified = localStamp();
+		});
+	}
 	async title(file: TFile): Promise<string> {
 		const heading = (await this.app.vault.read(file)).match(/^#\s+(.+)$/m)?.[1]?.trim();
 		return heading || file.basename;
@@ -333,13 +395,14 @@ export default class BetterStickyNotes extends Plugin {
 		try { await action(); await this.refreshAll(); }
 		catch (error) { new Notice(error instanceof Error ? error.message : "Could not update the note."); }
 	}
-	async openRelatedDocument(text: string, sourcePath: string): Promise<boolean> {
+	async resolveRelatedDocument(text: string, sourcePath: string): Promise<TFile | undefined> {
 		const wiki = text.match(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/);
 		const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
 		const target = (wiki?.[1] ?? markdown?.[1] ?? text).trim();
-		if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
+		if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return undefined;
 		const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\.md$/i, "").trim().toLocaleLowerCase();
 		let destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+		if (destination && destination.extension !== "md") destination = null;
 		if (!destination) {
 			const wanted = normalize(target);
 			const matches = this.app.vault.getMarkdownFiles().filter((file) => {
@@ -351,11 +414,30 @@ export default class BetterStickyNotes extends Plugin {
 			});
 			if (matches.length === 1) destination = matches[0];
 		}
+		if (!destination) return undefined;
+		return destination;
+	}
+	async openRelatedDocument(text: string, sourcePath: string): Promise<boolean> {
+		const destination = await this.resolveRelatedDocument(text, sourcePath);
 		if (!destination) return false;
 		const leaf = this.app.workspace.getLeaf("tab");
 		await leaf.openFile(destination);
 		this.app.workspace.revealLeaf(leaf);
 		return true;
+	}
+	async syncRelatedTaskDocuments(source: TFile, entries: Entry[]): Promise<Entry[]> {
+		const results: Entry[] = [];
+		for (const entry of entries) {
+			if (entry.kind === "bullet") { results.push(entry); continue; }
+			const target = await this.resolveRelatedDocument(entry.text, source.path);
+			const targetPath = target && target.path !== source.path ? target.path : undefined;
+			const previousPath = entry.metadata?.related_note;
+			if (previousPath && previousPath !== targetPath) await this.notes.removeRelatedTask(previousPath, entry.id, source.path);
+			if (target && targetPath) await this.notes.syncRelatedTask(target, source, entry);
+			if (previousPath !== targetPath) await this.notes.setRelatedNote(source, entry.id, targetPath);
+			results.push({ ...entry, metadata: entry.metadata ? { ...entry.metadata, related_note: targetPath } : undefined });
+		}
+		return results;
 	}
 	async forwardPreviousWeek(file: TFile, date: Date): Promise<void> {
 		const currentWeek = monday(date);
@@ -451,6 +533,7 @@ export default class BetterStickyNotes extends Plugin {
 			return lines.join("\n");
 		});
 		this.lastTrashPath = path;
+		if (entry.metadata?.related_note) await this.notes.removeRelatedTask(entry.metadata.related_note, entry.id, file.path);
 	}
 	async undoDelete(): Promise<void> {
 		if (!this.lastTrashPath) return;
@@ -503,7 +586,8 @@ class StickyView extends ItemView {
 
 		const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote("weekly", this.plugin.viewingDate);
 		if (!this.plugin.logbook) await this.plugin.forwardPreviousWeek(file, this.plugin.viewingDate);
-		const entries = await this.plugin.notes.entries(file);
+		let entries = await this.plugin.notes.entries(file);
+		if (!this.plugin.logbook) entries = await this.plugin.syncRelatedTaskDocuments(file, entries);
 		const list = root.createDiv({ cls: "bsn-list" });
 		for (const entry of entries) this.renderEntry(list, file, entry);
 		if (!this.plugin.logbook) {

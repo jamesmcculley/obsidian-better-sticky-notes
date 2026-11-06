@@ -305,6 +305,76 @@ var VaultNotes = class {
       frontmatter.last_modified = stamp;
     });
   }
+  async setRelatedNote(file, id, path) {
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const tasks = Array.isArray(frontmatter.bsn_tasks) ? frontmatter.bsn_tasks : [];
+      const task = tasks.find((item) => item.id === id);
+      if (!task || task.related_note === path) return;
+      if (path) task.related_note = path;
+      else delete task.related_note;
+      task.last_modified = localStamp();
+      frontmatter.last_modified = task.last_modified;
+    });
+  }
+  async syncRelatedTask(target, source, entry) {
+    var _a;
+    const task = entry.metadata;
+    if (!task) return;
+    const record = {
+      id: entry.id,
+      title: entry.text,
+      status: entry.done ? "done" : "open",
+      created: task.created,
+      start: task.start,
+      last_modified: task.last_modified,
+      week_of: task.week_of,
+      source_week: source.path,
+      ...entry.done ? { done: (_a = normalizeDoneStamp(entry.doneDate)) != null ? _a : task.done } : {},
+      ...entry.externalUrl ? { external_url: entry.externalUrl } : {}
+    };
+    await this.app.fileManager.processFrontMatter(target, (frontmatter) => {
+      let changed = false;
+      const related = Array.isArray(frontmatter.bsn_related_tasks) ? frontmatter.bsn_related_tasks : [];
+      const old = related.find((item) => item.id === entry.id && item.source_week === source.path);
+      if (!old) {
+        related.push(record);
+        changed = true;
+      } else {
+        const oldFields = old;
+        const newFields = record;
+        for (const field of ["title", "status", "created", "start", "last_modified", "week_of", "done", "external_url"]) {
+          const value = newFields[field];
+          if (value === void 0) {
+            if (oldFields[field] !== void 0) {
+              delete oldFields[field];
+              changed = true;
+            }
+          } else if (oldFields[field] !== value) {
+            oldFields[field] = value;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        frontmatter.bsn_related_tasks = related;
+        frontmatter.last_modified = localStamp();
+      }
+      if (!frontmatter.created) frontmatter.created = localStamp(new Date(target.stat.ctime || Date.now()));
+      if (!frontmatter.start) frontmatter.start = record.start;
+      if (!frontmatter.last_modified) frontmatter.last_modified = localStamp();
+    });
+  }
+  async removeRelatedTask(path, id, sourceWeek) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian.TFile)) return;
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const related = Array.isArray(frontmatter.bsn_related_tasks) ? frontmatter.bsn_related_tasks : [];
+      const next = related.filter((item) => !(item.id === id && item.source_week === sourceWeek));
+      if (next.length === related.length) return;
+      frontmatter.bsn_related_tasks = next;
+      frontmatter.last_modified = localStamp();
+    });
+  }
   async title(file) {
     var _a, _b;
     const heading = (_b = (_a = (await this.app.vault.read(file)).match(/^#\s+(.+)$/m)) == null ? void 0 : _a[1]) == null ? void 0 : _b.trim();
@@ -381,14 +451,15 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(error instanceof Error ? error.message : "Could not update the note.");
     }
   }
-  async openRelatedDocument(text, sourcePath) {
+  async resolveRelatedDocument(text, sourcePath) {
     var _a, _b;
     const wiki = text.match(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/);
     const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
     const target = ((_b = (_a = wiki == null ? void 0 : wiki[1]) != null ? _a : markdown == null ? void 0 : markdown[1]) != null ? _b : text).trim();
-    if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
+    if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return void 0;
     const normalize = (value) => value.replace(/\\/g, "/").replace(/\.md$/i, "").trim().toLocaleLowerCase();
     let destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+    if (destination && destination.extension !== "md") destination = null;
     if (!destination) {
       const wanted = normalize(target);
       const matches = this.app.vault.getMarkdownFiles().filter((file) => {
@@ -401,11 +472,34 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
       });
       if (matches.length === 1) destination = matches[0];
     }
+    if (!destination) return void 0;
+    return destination;
+  }
+  async openRelatedDocument(text, sourcePath) {
+    const destination = await this.resolveRelatedDocument(text, sourcePath);
     if (!destination) return false;
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.openFile(destination);
     this.app.workspace.revealLeaf(leaf);
     return true;
+  }
+  async syncRelatedTaskDocuments(source, entries) {
+    var _a;
+    const results = [];
+    for (const entry of entries) {
+      if (entry.kind === "bullet") {
+        results.push(entry);
+        continue;
+      }
+      const target = await this.resolveRelatedDocument(entry.text, source.path);
+      const targetPath = target && target.path !== source.path ? target.path : void 0;
+      const previousPath = (_a = entry.metadata) == null ? void 0 : _a.related_note;
+      if (previousPath && previousPath !== targetPath) await this.notes.removeRelatedTask(previousPath, entry.id, source.path);
+      if (target && targetPath) await this.notes.syncRelatedTask(target, source, entry);
+      if (previousPath !== targetPath) await this.notes.setRelatedNote(source, entry.id, targetPath);
+      results.push({ ...entry, metadata: entry.metadata ? { ...entry.metadata, related_note: targetPath } : void 0 });
+    }
+    return results;
   }
   async forwardPreviousWeek(file, date) {
     var _a, _b;
@@ -495,18 +589,20 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     });
   }
   async deleteEntry(file, entry) {
+    var _a;
     const trashFolder = `${this.settings.folder}/.trash`;
     await this.notes.ensureFolder(trashFolder);
     const path = `${trashFolder}/${Date.now()}-${file.basename}-${entry.line}.json`;
     await this.app.vault.create(path, JSON.stringify({ path: file.path, line: entry.line, content: await this.app.vault.read(file).then((v) => v.split("\n")[entry.line]) }, null, 2));
     await this.app.vault.process(file, (data) => {
-      var _a;
+      var _a2;
       const lines = data.split("\n");
-      if (!sameEntry(parseLine((_a = lines[entry.line]) != null ? _a : "", entry.line), entry)) throw new Error("This note changed outside the plugin. The deleted item is saved in Trash.");
+      if (!sameEntry(parseLine((_a2 = lines[entry.line]) != null ? _a2 : "", entry.line), entry)) throw new Error("This note changed outside the plugin. The deleted item is saved in Trash.");
       lines.splice(entry.line, 1);
       return lines.join("\n");
     });
     this.lastTrashPath = path;
+    if ((_a = entry.metadata) == null ? void 0 : _a.related_note) await this.notes.removeRelatedTask(entry.metadata.related_note, entry.id, file.path);
   }
   async undoDelete() {
     if (!this.lastTrashPath) return;
@@ -593,7 +689,8 @@ var StickyView = class extends import_obsidian.ItemView {
     };
     const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote("weekly", this.plugin.viewingDate);
     if (!this.plugin.logbook) await this.plugin.forwardPreviousWeek(file, this.plugin.viewingDate);
-    const entries = await this.plugin.notes.entries(file);
+    let entries = await this.plugin.notes.entries(file);
+    if (!this.plugin.logbook) entries = await this.plugin.syncRelatedTaskDocuments(file, entries);
     const list = root.createDiv({ cls: "bsn-list" });
     for (const entry of entries) this.renderEntry(list, file, entry);
     if (!this.plugin.logbook) {
