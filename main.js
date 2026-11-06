@@ -184,7 +184,20 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
     const target = ((_b = (_a = wiki == null ? void 0 : wiki[1]) != null ? _a : markdown == null ? void 0 : markdown[1]) != null ? _b : text).trim();
     if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
-    const destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+    const normalize = (value) => value.replace(/\\/g, "/").replace(/\.md$/i, "").trim().toLocaleLowerCase();
+    let destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+    if (!destination) {
+      const wanted = normalize(target);
+      const matches = this.app.vault.getMarkdownFiles().filter((file) => {
+        var _a2;
+        if (normalize(file.path) === wanted || normalize(file.basename) === wanted) return true;
+        const frontmatter = (_a2 = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a2.frontmatter;
+        const aliasesValue = frontmatter == null ? void 0 : frontmatter.aliases;
+        const aliases = Array.isArray(aliasesValue) ? aliasesValue : [aliasesValue];
+        return typeof (frontmatter == null ? void 0 : frontmatter.title) === "string" && normalize(frontmatter.title) === wanted || aliases.some((alias) => typeof alias === "string" && normalize(alias) === wanted);
+      });
+      if (matches.length === 1) destination = matches[0];
+    }
     if (!destination) return false;
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.openFile(destination);
@@ -394,13 +407,16 @@ var StickyView = class extends import_obsidian.ItemView {
     const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
     label.onclick = async () => {
       try {
-        if (await this.plugin.openRelatedDocument(entry.text, file.path) || this.plugin.logbook) return;
-        this.beginEdit(label, file, entry);
+        if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
+          new import_obsidian.Notice(`No matching note found for \u201C${displayEntryText(entry.text)}\u201D. Try a [[wikilink]] or check the note title.`);
+        }
       } catch (error) {
         new import_obsidian.Notice(error instanceof Error ? error.message : "Could not open the related note.");
       }
     };
     if (!this.plugin.logbook) {
+      const edit = row.createEl("button", { text: "\u270E", cls: "bsn-edit", attr: { type: "button", "aria-label": "Edit task" } });
+      edit.onclick = () => this.beginEdit(label, file, entry);
       const up = row.createEl("button", { text: "\u2191", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
       up.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, -1));
       const down = row.createEl("button", { text: "\u2193", cls: "bsn-order", attr: { "aria-label": "Move item down" } });

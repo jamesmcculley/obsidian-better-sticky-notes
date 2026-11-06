@@ -160,7 +160,19 @@ export default class BetterStickyNotes extends Plugin {
 		const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
 		const target = (wiki?.[1] ?? markdown?.[1] ?? text).trim();
 		if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
-		const destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+		const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\.md$/i, "").trim().toLocaleLowerCase();
+		let destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+		if (!destination) {
+			const wanted = normalize(target);
+			const matches = this.app.vault.getMarkdownFiles().filter((file) => {
+				if (normalize(file.path) === wanted || normalize(file.basename) === wanted) return true;
+				const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+				const aliasesValue = frontmatter?.aliases;
+				const aliases = Array.isArray(aliasesValue) ? aliasesValue : [aliasesValue];
+				return (typeof frontmatter?.title === "string" && normalize(frontmatter.title) === wanted) || aliases.some((alias) => typeof alias === "string" && normalize(alias) === wanted);
+			});
+			if (matches.length === 1) destination = matches[0];
+		}
 		if (!destination) return false;
 		const leaf = this.app.workspace.getLeaf("tab");
 		await leaf.openFile(destination);
@@ -310,11 +322,14 @@ class StickyView extends ItemView {
 		const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
 		label.onclick = async () => {
 			try {
-				if (await this.plugin.openRelatedDocument(entry.text, file.path) || this.plugin.logbook) return;
-				this.beginEdit(label, file, entry);
+				if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
+					new Notice(`No matching note found for “${displayEntryText(entry.text)}”. Try a [[wikilink]] or check the note title.`);
+				}
 			} catch (error) { new Notice(error instanceof Error ? error.message : "Could not open the related note."); }
 		};
 		if (!this.plugin.logbook) {
+			const edit = row.createEl("button", { text: "✎", cls: "bsn-edit", attr: { type: "button", "aria-label": "Edit task" } });
+			edit.onclick = () => this.beginEdit(label, file, entry);
 			const up = row.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
 			up.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, -1));
 			const down = row.createEl("button", { text: "↓", cls: "bsn-order", attr: { "aria-label": "Move item down" } });

@@ -117,6 +117,7 @@
 	min-height: 34px;
 }
 
+.bsn-edit,
 .bsn-order,
 .bsn-delete,
 .bsn-move-date {
@@ -124,9 +125,11 @@
 	opacity: .72;
 }
 
+.bsn-edit:hover,
 .bsn-order:hover,
 .bsn-delete:hover,
 .bsn-move-date:hover,
+.bsn-edit:focus-visible,
 .bsn-order:focus-visible,
 .bsn-delete:focus-visible,
 .bsn-move-date:focus-visible {
@@ -158,6 +161,7 @@
 }
 
 @media (hover: none) {
+	.bsn-edit,
 	.bsn-order,
 	.bsn-delete,
 	.bsn-move-date { opacity: 1; }
