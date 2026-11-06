@@ -115,7 +115,7 @@ function sameEntry(current: Entry | null, expected: Entry): boolean {
 export default class BetterStickyNotes extends Plugin {
 	settings: Settings = DEFAULT_SETTINGS;
 	notes!: VaultNotes;
-	period: Period = "daily";
+	period: Period = "weekly";
 	viewingDate = new Date();
 	logbook = false;
 	lastTrashPath?: string;
@@ -265,6 +265,7 @@ export default class BetterStickyNotes extends Plugin {
 
 class StickyView extends ItemView {
 	private dateInput?: HTMLInputElement;
+	private editingKey?: string;
 	constructor(leaf: WorkspaceLeaf, private plugin: BetterStickyNotes) { super(leaf); }
 	getViewType(): string { return VIEW_TYPE; }
 	getDisplayText(): string { return "Better Sticky Notes"; }
@@ -273,27 +274,21 @@ class StickyView extends ItemView {
 	async render(): Promise<void> {
 		const root = this.containerEl.children[1] as HTMLElement;
 		root.empty(); root.addClass("bsn-root");
-		const header = root.createDiv({ cls: "bsn-header" });
-		const title = header.createEl("button", { cls: "bsn-title", text: this.plugin.logbook ? "Logbook" : noteTitle(this.plugin.period, this.plugin.viewingDate) });
-		title.onclick = () => { this.plugin.logbook = !this.plugin.logbook; void this.render(); };
-		const period = header.createEl("select", { cls: "bsn-period" });
-		for (const p of ["daily", "weekly"] as Period[]) { const option = period.createEl("option", { text: p === "daily" ? "Daily" : "Weekly", value: p }); option.selected = p === this.plugin.period; }
-		period.onchange = () => { this.plugin.period = period.value as Period; this.plugin.logbook = false; void this.render(); };
 		const navigator = root.createDiv({ cls: "bsn-navigator" });
 		const previous = navigator.createEl("button", { text: "‹", attr: { "aria-label": "Previous" } });
-		previous.onclick = () => { this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() - (this.plugin.period === "weekly" ? 7 : 1)); void this.render(); };
+		previous.hidden = this.plugin.logbook;
+		previous.onclick = () => { this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() - 7); void this.render(); };
 		this.dateInput = navigator.createEl("input", { type: "date" });
-		this.dateInput.value = dayId(this.plugin.period === "weekly" ? monday(this.plugin.viewingDate) : this.plugin.viewingDate);
-		this.dateInput.onchange = () => { if (this.dateInput?.value) { this.plugin.viewingDate = new Date(`${this.dateInput.value}T12:00:00`); void this.render(); } };
+		this.dateInput.hidden = this.plugin.logbook;
+		this.dateInput.value = dayId(monday(this.plugin.viewingDate));
+		this.dateInput.onchange = () => { if (this.dateInput?.value) { this.plugin.viewingDate = monday(new Date(`${this.dateInput.value}T12:00:00`)); void this.render(); } };
 		const next = navigator.createEl("button", { text: "›", attr: { "aria-label": "Next" } });
-		next.onclick = () => { this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() + (this.plugin.period === "weekly" ? 7 : 1)); void this.render(); };
-		const today = navigator.createEl("button", { text: this.plugin.period === "weekly" ? "This week" : "Today" });
-		today.onclick = () => { this.plugin.viewingDate = new Date(); this.plugin.logbook = false; void this.render(); };
-		const pop = navigator.createEl("button", { text: "Pop out", attr: { "aria-label": "Open separate window" } });
-		pop.hidden = !Platform.isDesktopApp;
-		pop.onclick = () => void this.plugin.activateView(true);
+		next.hidden = this.plugin.logbook;
+		next.onclick = () => { this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() + 7); void this.render(); };
+		const logbook = navigator.createEl("button", { text: this.plugin.logbook ? "Weekly" : "Logbook", cls: "bsn-logbook" });
+		logbook.onclick = () => { this.plugin.logbook = !this.plugin.logbook; void this.render(); };
 
-		const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote(this.plugin.period, this.plugin.viewingDate);
+		const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote("weekly", this.plugin.viewingDate);
 		const entries = await this.plugin.notes.entries(file);
 		const list = root.createDiv({ cls: "bsn-list" });
 		for (const entry of entries) this.renderEntry(list, file, entry);
@@ -313,48 +308,70 @@ class StickyView extends ItemView {
 		}
 	}
 	private renderEntry(parent: HTMLElement, file: TFile, entry: Entry): void {
-		const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}` });
+		const key = `${file.path}:${entry.line}`;
+		const editing = !this.plugin.logbook && this.editingKey === key;
+		const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}${editing ? " is-editing" : ""}` });
 		row.toggleClass("is-done", entry.done);
+		let input: HTMLInputElement | undefined;
 		if (entry.kind !== "bullet" && !this.plugin.logbook) {
 			const check = row.createEl("input", { type: "checkbox" }); check.checked = entry.done;
-			check.onchange = () => void this.plugin.run(() => this.plugin.complete(file, entry));
+			check.onchange = () => void this.runEntryAction(file, entry, (current) => this.plugin.complete(file, current), input);
 		}
-		const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
-		label.onclick = async () => {
-			try {
-				if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
-					new Notice(`No matching note found for “${displayEntryText(entry.text)}”. Try a [[wikilink]] or check the note title.`);
-				}
-			} catch (error) { new Notice(error instanceof Error ? error.message : "Could not open the related note."); }
-		};
+		if (editing) {
+			input = row.createEl("input", { cls: "bsn-text-edit", type: "text" });
+			input.value = entry.text;
+			input.onkeydown = (event) => {
+				if (event.key === "Enter") { event.preventDefault(); this.finishEdit(file, entry, input!); }
+				if (event.key === "Escape") { input!.value = entry.text; this.editingKey = undefined; void this.render(); }
+			};
+			window.setTimeout(() => { input?.focus(); input?.select(); }, 0);
+		} else {
+			const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open matching note" } });
+			label.onclick = async () => {
+				try {
+					if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
+						new Notice(`No matching note found for “${displayEntryText(entry.text)}”. Try a [[wikilink]] or check the note title.`);
+					}
+				} catch (error) { new Notice(error instanceof Error ? error.message : "Could not open the related note."); }
+			};
+		}
 		if (!this.plugin.logbook) {
-			const edit = row.createEl("button", { text: "✎", cls: "bsn-edit", attr: { type: "button", "aria-label": "Edit task" } });
-			edit.onclick = () => this.beginEdit(label, file, entry);
-			const up = row.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
-			up.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, -1));
-			const down = row.createEl("button", { text: "↓", cls: "bsn-order", attr: { "aria-label": "Move item down" } });
-			down.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, 1));
-			const move = row.createEl("input", { type: "date", cls: "bsn-move-date", attr: { title: "Move to date" } });
-			move.onchange = () => { if (move.value) void this.plugin.run(() => this.plugin.moveEntry(file, entry, new Date(`${move.value}T12:00:00`))); };
-			const del = row.createEl("button", { text: "×", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
-			del.onclick = () => void this.plugin.run(() => this.plugin.deleteEntry(file, entry));
+			const pencil = row.createEl("button", { text: "✎", cls: "bsn-edit", attr: { type: "button", "aria-label": editing ? "Finish editing" : "Edit item" } });
+			pencil.onclick = () => {
+				if (editing && input) this.finishEdit(file, entry, input);
+				else { this.editingKey = key; void this.render(); }
+			};
+			if (editing) {
+				const actions = row.createDiv({ cls: "bsn-actions" });
+				const up = actions.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
+				up.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, -1), input);
+				const down = actions.createEl("button", { text: "↓", cls: "bsn-order", attr: { "aria-label": "Move item down" } });
+				down.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, 1), input);
+				const move = actions.createEl("input", { type: "date", cls: "bsn-move-date", attr: { title: "Move to date" } });
+				move.onchange = () => { if (move.value) void this.runEntryAction(file, entry, (current) => this.plugin.moveEntry(file, current, new Date(`${move.value}T12:00:00`)), input); };
+				const del = actions.createEl("button", { text: "×", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
+				del.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.deleteEntry(file, current), input);
+			}
 		}
 	}
-	private beginEdit(label: HTMLButtonElement, file: TFile, entry: Entry): void {
-		const input = label.parentElement!.createEl("input", { cls: "bsn-text-edit", type: "text" });
-		input.value = entry.text;
-		label.replaceWith(input);
-		input.focus(); input.select();
-		input.onkeydown = (event) => {
-			if (event.key === "Enter") input.blur();
-			if (event.key === "Escape") { input.value = entry.text; input.blur(); }
-		};
-		input.onblur = () => {
-			const value = input.value.trim();
-			if (!value) { new Notice("An item cannot be empty."); void this.render(); return; }
-			if (value !== entry.text) void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
-			else void this.render();
-		};
+	private finishEdit(file: TFile, entry: Entry, input: HTMLInputElement): void {
+		const value = input.value.trim();
+		if (!value) { new Notice("An item cannot be empty."); input.focus(); return; }
+		this.editingKey = undefined;
+		void this.plugin.run(() => value === entry.text ? Promise.resolve() : this.plugin.editEntry(file, entry, value));
+	}
+	private runEntryAction(file: TFile, entry: Entry, action: (current: Entry) => Promise<void>, input?: HTMLInputElement): Promise<void> {
+		return this.plugin.run(async () => {
+			let current = entry;
+			if (input && input.value.trim() !== entry.text) {
+				const value = input.value.trim();
+				if (!value) throw new Error("An item cannot be empty.");
+				await this.plugin.editEntry(file, entry, value);
+				current = { ...entry, text: value };
+			}
+			this.editingKey = undefined;
+			await action(current);
+		});
 	}
 }
 

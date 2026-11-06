@@ -127,7 +127,7 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
-    this.period = "daily";
+    this.period = "weekly";
     this.viewingDate = /* @__PURE__ */ new Date();
     this.logbook = false;
   }
@@ -322,52 +322,35 @@ var StickyView = class extends import_obsidian.ItemView {
     const root = this.containerEl.children[1];
     root.empty();
     root.addClass("bsn-root");
-    const header = root.createDiv({ cls: "bsn-header" });
-    const title = header.createEl("button", { cls: "bsn-title", text: this.plugin.logbook ? "Logbook" : noteTitle(this.plugin.period, this.plugin.viewingDate) });
-    title.onclick = () => {
-      this.plugin.logbook = !this.plugin.logbook;
-      void this.render();
-    };
-    const period = header.createEl("select", { cls: "bsn-period" });
-    for (const p of ["daily", "weekly"]) {
-      const option = period.createEl("option", { text: p === "daily" ? "Daily" : "Weekly", value: p });
-      option.selected = p === this.plugin.period;
-    }
-    period.onchange = () => {
-      this.plugin.period = period.value;
-      this.plugin.logbook = false;
-      void this.render();
-    };
     const navigator = root.createDiv({ cls: "bsn-navigator" });
     const previous = navigator.createEl("button", { text: "\u2039", attr: { "aria-label": "Previous" } });
+    previous.hidden = this.plugin.logbook;
     previous.onclick = () => {
-      this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() - (this.plugin.period === "weekly" ? 7 : 1));
+      this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() - 7);
       void this.render();
     };
     this.dateInput = navigator.createEl("input", { type: "date" });
-    this.dateInput.value = dayId(this.plugin.period === "weekly" ? monday(this.plugin.viewingDate) : this.plugin.viewingDate);
+    this.dateInput.hidden = this.plugin.logbook;
+    this.dateInput.value = dayId(monday(this.plugin.viewingDate));
     this.dateInput.onchange = () => {
       var _a;
       if ((_a = this.dateInput) == null ? void 0 : _a.value) {
-        this.plugin.viewingDate = /* @__PURE__ */ new Date(`${this.dateInput.value}T12:00:00`);
+        this.plugin.viewingDate = monday(/* @__PURE__ */ new Date(`${this.dateInput.value}T12:00:00`));
         void this.render();
       }
     };
     const next = navigator.createEl("button", { text: "\u203A", attr: { "aria-label": "Next" } });
+    next.hidden = this.plugin.logbook;
     next.onclick = () => {
-      this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() + (this.plugin.period === "weekly" ? 7 : 1));
+      this.plugin.viewingDate.setDate(this.plugin.viewingDate.getDate() + 7);
       void this.render();
     };
-    const today = navigator.createEl("button", { text: this.plugin.period === "weekly" ? "This week" : "Today" });
-    today.onclick = () => {
-      this.plugin.viewingDate = /* @__PURE__ */ new Date();
-      this.plugin.logbook = false;
+    const logbook = navigator.createEl("button", { text: this.plugin.logbook ? "Weekly" : "Logbook", cls: "bsn-logbook" });
+    logbook.onclick = () => {
+      this.plugin.logbook = !this.plugin.logbook;
       void this.render();
     };
-    const pop = navigator.createEl("button", { text: "Pop out", attr: { "aria-label": "Open separate window" } });
-    pop.hidden = !import_obsidian.Platform.isDesktopApp;
-    pop.onclick = () => void this.plugin.activateView(true);
-    const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote(this.plugin.period, this.plugin.viewingDate);
+    const file = this.plugin.logbook ? await this.plugin.notes.getLogbook() : await this.plugin.notes.ensureNote("weekly", this.plugin.viewingDate);
     const entries = await this.plugin.notes.entries(file);
     const list = root.createDiv({ cls: "bsn-list" });
     for (const entry of entries) this.renderEntry(list, file, entry);
@@ -397,61 +380,92 @@ var StickyView = class extends import_obsidian.ItemView {
     }
   }
   renderEntry(parent, file, entry) {
-    const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}` });
+    const key = `${file.path}:${entry.line}`;
+    const editing = !this.plugin.logbook && this.editingKey === key;
+    const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}${editing ? " is-editing" : ""}` });
     row.toggleClass("is-done", entry.done);
+    let input;
     if (entry.kind !== "bullet" && !this.plugin.logbook) {
       const check = row.createEl("input", { type: "checkbox" });
       check.checked = entry.done;
-      check.onchange = () => void this.plugin.run(() => this.plugin.complete(file, entry));
+      check.onchange = () => void this.runEntryAction(file, entry, (current) => this.plugin.complete(file, current), input);
     }
-    const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
-    label.onclick = async () => {
-      try {
-        if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
-          new import_obsidian.Notice(`No matching note found for \u201C${displayEntryText(entry.text)}\u201D. Try a [[wikilink]] or check the note title.`);
+    if (editing) {
+      input = row.createEl("input", { cls: "bsn-text-edit", type: "text" });
+      input.value = entry.text;
+      input.onkeydown = (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          this.finishEdit(file, entry, input);
         }
-      } catch (error) {
-        new import_obsidian.Notice(error instanceof Error ? error.message : "Could not open the related note.");
-      }
-    };
-    if (!this.plugin.logbook) {
-      const edit = row.createEl("button", { text: "\u270E", cls: "bsn-edit", attr: { type: "button", "aria-label": "Edit task" } });
-      edit.onclick = () => this.beginEdit(label, file, entry);
-      const up = row.createEl("button", { text: "\u2191", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
-      up.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, -1));
-      const down = row.createEl("button", { text: "\u2193", cls: "bsn-order", attr: { "aria-label": "Move item down" } });
-      down.onclick = () => void this.plugin.run(() => this.plugin.reorderEntry(file, entry, 1));
-      const move = row.createEl("input", { type: "date", cls: "bsn-move-date", attr: { title: "Move to date" } });
-      move.onchange = () => {
-        if (move.value) void this.plugin.run(() => this.plugin.moveEntry(file, entry, /* @__PURE__ */ new Date(`${move.value}T12:00:00`)));
+        if (event.key === "Escape") {
+          input.value = entry.text;
+          this.editingKey = void 0;
+          void this.render();
+        }
       };
-      const del = row.createEl("button", { text: "\xD7", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
-      del.onclick = () => void this.plugin.run(() => this.plugin.deleteEntry(file, entry));
+      window.setTimeout(() => {
+        input == null ? void 0 : input.focus();
+        input == null ? void 0 : input.select();
+      }, 0);
+    } else {
+      const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open matching note" } });
+      label.onclick = async () => {
+        try {
+          if (!await this.plugin.openRelatedDocument(entry.text, file.path)) {
+            new import_obsidian.Notice(`No matching note found for \u201C${displayEntryText(entry.text)}\u201D. Try a [[wikilink]] or check the note title.`);
+          }
+        } catch (error) {
+          new import_obsidian.Notice(error instanceof Error ? error.message : "Could not open the related note.");
+        }
+      };
+    }
+    if (!this.plugin.logbook) {
+      const pencil = row.createEl("button", { text: "\u270E", cls: "bsn-edit", attr: { type: "button", "aria-label": editing ? "Finish editing" : "Edit item" } });
+      pencil.onclick = () => {
+        if (editing && input) this.finishEdit(file, entry, input);
+        else {
+          this.editingKey = key;
+          void this.render();
+        }
+      };
+      if (editing) {
+        const actions = row.createDiv({ cls: "bsn-actions" });
+        const up = actions.createEl("button", { text: "\u2191", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
+        up.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, -1), input);
+        const down = actions.createEl("button", { text: "\u2193", cls: "bsn-order", attr: { "aria-label": "Move item down" } });
+        down.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, 1), input);
+        const move = actions.createEl("input", { type: "date", cls: "bsn-move-date", attr: { title: "Move to date" } });
+        move.onchange = () => {
+          if (move.value) void this.runEntryAction(file, entry, (current) => this.plugin.moveEntry(file, current, /* @__PURE__ */ new Date(`${move.value}T12:00:00`)), input);
+        };
+        const del = actions.createEl("button", { text: "\xD7", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
+        del.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.deleteEntry(file, current), input);
+      }
     }
   }
-  beginEdit(label, file, entry) {
-    const input = label.parentElement.createEl("input", { cls: "bsn-text-edit", type: "text" });
-    input.value = entry.text;
-    label.replaceWith(input);
-    input.focus();
-    input.select();
-    input.onkeydown = (event) => {
-      if (event.key === "Enter") input.blur();
-      if (event.key === "Escape") {
-        input.value = entry.text;
-        input.blur();
+  finishEdit(file, entry, input) {
+    const value = input.value.trim();
+    if (!value) {
+      new import_obsidian.Notice("An item cannot be empty.");
+      input.focus();
+      return;
+    }
+    this.editingKey = void 0;
+    void this.plugin.run(() => value === entry.text ? Promise.resolve() : this.plugin.editEntry(file, entry, value));
+  }
+  runEntryAction(file, entry, action, input) {
+    return this.plugin.run(async () => {
+      let current = entry;
+      if (input && input.value.trim() !== entry.text) {
+        const value = input.value.trim();
+        if (!value) throw new Error("An item cannot be empty.");
+        await this.plugin.editEntry(file, entry, value);
+        current = { ...entry, text: value };
       }
-    };
-    input.onblur = () => {
-      const value = input.value.trim();
-      if (!value) {
-        new import_obsidian.Notice("An item cannot be empty.");
-        void this.render();
-        return;
-      }
-      if (value !== entry.text) void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
-      else void this.render();
-    };
+      this.editingKey = void 0;
+      await action(current);
+    });
   }
 };
 var StickySettings = class extends import_obsidian.PluginSettingTab {
