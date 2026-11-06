@@ -51,6 +51,12 @@ function encodeEntry(entry: Entry, text: string, done: boolean, stamp?: string):
 	const marker = entry.kind === "check" ? (done ? "- [x] " : "- [ ] ") : entry.kind === "task" ? (done ? "- (x) " : "- ( ) ") : "- ";
 	return marker + text + (done && stamp ? ` @done(${stamp})` : "");
 }
+function displayEntryText(text: string): string {
+	return text
+		.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\|([^\]]+)\]\]/g, "$2")
+		.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\]\]/g, "$1")
+		.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+}
 function safeFolder(value: string): string {
 	const parts = value.trim().replace(/\\/g, "/").split("/").filter(Boolean);
 	if (!parts.length || parts.some((part) => part === "." || part === ".." || part.startsWith("."))) throw new Error("Choose a visible folder path inside the vault.");
@@ -148,6 +154,18 @@ export default class BetterStickyNotes extends Plugin {
 	async run(action: () => Promise<void>): Promise<void> {
 		try { await action(); await this.refreshAll(); }
 		catch (error) { new Notice(error instanceof Error ? error.message : "Could not update the note."); }
+	}
+	async openRelatedDocument(text: string, sourcePath: string): Promise<boolean> {
+		const wiki = text.match(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/);
+		const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
+		const target = (wiki?.[1] ?? markdown?.[1] ?? text).trim();
+		if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
+		const destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+		if (!destination) return false;
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.openFile(destination);
+		this.app.workspace.revealLeaf(leaf);
+		return true;
 	}
 	async complete(file: TFile, entry: Entry): Promise<void> {
 		if (entry.kind === "bullet") return;
@@ -284,16 +302,17 @@ class StickyView extends ItemView {
 	}
 	private renderEntry(parent: HTMLElement, file: TFile, entry: Entry): void {
 		const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}` });
+		row.toggleClass("is-done", entry.done);
 		if (entry.kind !== "bullet" && !this.plugin.logbook) {
 			const check = row.createEl("input", { type: "checkbox" }); check.checked = entry.done;
 			check.onchange = () => void this.plugin.run(() => this.plugin.complete(file, entry));
 		}
-		const text = row.createEl("input", { cls: "bsn-text", type: "text" }); text.value = entry.text; text.readOnly = this.plugin.logbook;
-		text.onblur = () => {
-			if (text.value === entry.text || this.plugin.logbook) return;
-			const value = text.value.trim();
-			if (!value) { text.value = entry.text; new Notice("An item cannot be empty."); return; }
-			void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
+		const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
+		label.onclick = async () => {
+			try {
+				if (await this.plugin.openRelatedDocument(entry.text, file.path) || this.plugin.logbook) return;
+				this.beginEdit(label, file, entry);
+			} catch (error) { new Notice(error instanceof Error ? error.message : "Could not open the related note."); }
 		};
 		if (!this.plugin.logbook) {
 			const up = row.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
@@ -305,6 +324,22 @@ class StickyView extends ItemView {
 			const del = row.createEl("button", { text: "×", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
 			del.onclick = () => void this.plugin.run(() => this.plugin.deleteEntry(file, entry));
 		}
+	}
+	private beginEdit(label: HTMLButtonElement, file: TFile, entry: Entry): void {
+		const input = label.parentElement!.createEl("input", { cls: "bsn-text-edit", type: "text" });
+		input.value = entry.text;
+		label.replaceWith(input);
+		input.focus(); input.select();
+		input.onkeydown = (event) => {
+			if (event.key === "Enter") input.blur();
+			if (event.key === "Escape") { input.value = entry.text; input.blur(); }
+		};
+		input.onblur = () => {
+			const value = input.value.trim();
+			if (!value) { new Notice("An item cannot be empty."); void this.render(); return; }
+			if (value !== entry.text) void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
+			else void this.render();
+		};
 	}
 }
 

@@ -60,6 +60,9 @@ function encodeEntry(entry, text, done, stamp) {
   const marker = entry.kind === "check" ? done ? "- [x] " : "- [ ] " : entry.kind === "task" ? done ? "- (x) " : "- ( ) " : "- ";
   return marker + text + (done && stamp ? ` @done(${stamp})` : "");
 }
+function displayEntryText(text) {
+  return text.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\]\]/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+}
 function safeFolder(value) {
   const parts = value.trim().replace(/\\/g, "/").split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === "." || part === ".." || part.startsWith("."))) throw new Error("Choose a visible folder path inside the vault.");
@@ -174,6 +177,19 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     } catch (error) {
       new import_obsidian.Notice(error instanceof Error ? error.message : "Could not update the note.");
     }
+  }
+  async openRelatedDocument(text, sourcePath) {
+    var _a, _b;
+    const wiki = text.match(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/);
+    const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
+    const target = ((_b = (_a = wiki == null ? void 0 : wiki[1]) != null ? _a : markdown == null ? void 0 : markdown[1]) != null ? _b : text).trim();
+    if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return false;
+    const destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
+    if (!destination) return false;
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(destination);
+    this.app.workspace.revealLeaf(leaf);
+    return true;
   }
   async complete(file, entry) {
     if (entry.kind === "bullet") return;
@@ -369,23 +385,20 @@ var StickyView = class extends import_obsidian.ItemView {
   }
   renderEntry(parent, file, entry) {
     const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}` });
+    row.toggleClass("is-done", entry.done);
     if (entry.kind !== "bullet" && !this.plugin.logbook) {
       const check = row.createEl("input", { type: "checkbox" });
       check.checked = entry.done;
       check.onchange = () => void this.plugin.run(() => this.plugin.complete(file, entry));
     }
-    const text = row.createEl("input", { cls: "bsn-text", type: "text" });
-    text.value = entry.text;
-    text.readOnly = this.plugin.logbook;
-    text.onblur = () => {
-      if (text.value === entry.text || this.plugin.logbook) return;
-      const value = text.value.trim();
-      if (!value) {
-        text.value = entry.text;
-        new import_obsidian.Notice("An item cannot be empty.");
-        return;
+    const label = row.createEl("button", { cls: "bsn-text", text: displayEntryText(entry.text), attr: { type: "button", title: "Open a matching note, or click to edit" } });
+    label.onclick = async () => {
+      try {
+        if (await this.plugin.openRelatedDocument(entry.text, file.path) || this.plugin.logbook) return;
+        this.beginEdit(label, file, entry);
+      } catch (error) {
+        new import_obsidian.Notice(error instanceof Error ? error.message : "Could not open the related note.");
       }
-      void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
     };
     if (!this.plugin.logbook) {
       const up = row.createEl("button", { text: "\u2191", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
@@ -399,6 +412,30 @@ var StickyView = class extends import_obsidian.ItemView {
       const del = row.createEl("button", { text: "\xD7", cls: "bsn-delete", attr: { "aria-label": "Delete item" } });
       del.onclick = () => void this.plugin.run(() => this.plugin.deleteEntry(file, entry));
     }
+  }
+  beginEdit(label, file, entry) {
+    const input = label.parentElement.createEl("input", { cls: "bsn-text-edit", type: "text" });
+    input.value = entry.text;
+    label.replaceWith(input);
+    input.focus();
+    input.select();
+    input.onkeydown = (event) => {
+      if (event.key === "Enter") input.blur();
+      if (event.key === "Escape") {
+        input.value = entry.text;
+        input.blur();
+      }
+    };
+    input.onblur = () => {
+      const value = input.value.trim();
+      if (!value) {
+        new import_obsidian.Notice("An item cannot be empty.");
+        void this.render();
+        return;
+      }
+      if (value !== entry.text) void this.plugin.run(() => this.plugin.editEntry(file, entry, value));
+      else void this.render();
+    };
   }
 };
 var StickySettings = class extends import_obsidian.PluginSettingTab {
