@@ -4,7 +4,13 @@ A compact daily and weekly task view backed by Markdown files in your vault. Wor
 
 ## Install
 
-Copy `main.js`, `manifest.json`, and `styles.css` into `<vault>/.obsidian/plugins/better-sticky-notes/`, then enable **Better Sticky Notes** in Obsidian's Community Plugins settings. For development, run `npm install` and `npm run build` in this folder.
+Create `<vault>/.obsidian/plugins/better-sticky-notes/`, then download these three files directly into it:
+
+- [main.js](https://raw.githubusercontent.com/jamesmcculley/obsidian-better-sticky-notes/main/main.js)
+- [manifest.json](https://raw.githubusercontent.com/jamesmcculley/obsidian-better-sticky-notes/main/manifest.json)
+- [styles.css](https://raw.githubusercontent.com/jamesmcculley/obsidian-better-sticky-notes/main/styles.css)
+
+Enable **Better Sticky Notes** in Obsidian's Community Plugins settings. For development, clone the repository, run `npm install`, then `npm run build`.
 
 ## Use
 
