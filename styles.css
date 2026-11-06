@@ -1,0 +1,31 @@
+.bsn-root {
+	padding: 10px;
+	max-width: 620px;
+	margin: 0 auto;
+}
+.bsn-header, .bsn-navigator, .bsn-entry {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.bsn-header { justify-content: space-between; margin-bottom: 8px; }
+.bsn-title {
+	font-size: 1.1em;
+	font-weight: var(--font-semibold);
+	background: transparent;
+	border: 0;
+	color: var(--text-normal);
+	text-align: left;
+}
+.bsn-navigator { margin-bottom: 8px; }
+.bsn-period { max-width: 90px; }
+.bsn-navigator input[type="date"] { min-width: 0; flex: 1; }
+.bsn-list { display: flex; flex-direction: column; gap: 3px; }
+.bsn-entry { min-height: 32px; }
+.bsn-entry input[type="checkbox"] { flex: 0 0 auto; }
+.bsn-text { flex: 1; min-width: 0; border: 0 !important; background: transparent !important; box-shadow: none !important; }
+.bsn-text[readonly] { color: var(--text-normal); }
+.bsn-add { width: 100%; margin-top: 8px; }
+.bsn-move-date { width: 34px; padding: 2px; }
+.bsn-delete { opacity: .65; }
+.bsn-undo { margin-top: 8px; }

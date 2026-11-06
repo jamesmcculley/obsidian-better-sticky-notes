@@ -1,0 +1,14 @@
+{
+  "name": "obsidian-better-sticky-notes",
+  "license": "MIT",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.5",
+    "obsidian": "latest",
+    "typescript": "^5.8.3"
+  }
+}
