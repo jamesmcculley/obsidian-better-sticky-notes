@@ -105,6 +105,14 @@ function markdownBodyStart(lines) {
   }
   return lines.length;
 }
+function syncRelatedDone(frontmatter, related) {
+  const stamps = related.filter((task) => task.status === "done").map((task) => normalizeDoneStamp(task.done)).filter((stamp) => !!stamp).sort();
+  const done = stamps[stamps.length - 1];
+  if (frontmatter.done === done) return false;
+  if (done) frontmatter.done = done;
+  else delete frontmatter.done;
+  return true;
+}
 var VaultNotes = class {
   constructor(app, getRoot) {
     this.app = app;
@@ -369,6 +377,7 @@ var VaultNotes = class {
           }
         }
       }
+      if (syncRelatedDone(frontmatter, related)) changed = true;
       if (changed) {
         frontmatter.bsn_related_tasks = related;
         frontmatter.last_modified = localStamp();
@@ -386,6 +395,7 @@ var VaultNotes = class {
       const next = related.filter((item) => !(item.id === id && item.source_week === sourceWeek));
       if (next.length === related.length) return;
       frontmatter.bsn_related_tasks = next;
+      syncRelatedDone(frontmatter, next);
       frontmatter.last_modified = localStamp();
     });
   }

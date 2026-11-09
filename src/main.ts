@@ -112,6 +112,17 @@ function markdownBodyStart(lines: string[]): number {
 	return lines.length;
 }
 
+// A linked note exposes the most recent completion among its related tasks.
+function syncRelatedDone(frontmatter: Record<string, unknown>, related: TaskMetadata[]): boolean {
+	const stamps = related.filter((task) => task.status === "done")
+		.map((task) => normalizeDoneStamp(task.done)).filter((stamp): stamp is string => !!stamp).sort();
+	const done = stamps[stamps.length - 1];
+	if (frontmatter.done === done) return false;
+	if (done) frontmatter.done = done;
+	else delete frontmatter.done;
+	return true;
+}
+
 class VaultNotes {
 	constructor(private app: App, private getRoot: () => string) {}
 	path(stack: string, id: string): string { return `${this.getRoot()}/${stack}/${id}`; }
@@ -327,6 +338,7 @@ class VaultNotes {
 					} else if (oldFields[field] !== value) { oldFields[field] = value; changed = true; }
 				}
 			}
+			if (syncRelatedDone(frontmatter, related)) changed = true;
 			if (changed) {
 				frontmatter.bsn_related_tasks = related;
 				frontmatter.last_modified = localStamp();
@@ -344,6 +356,7 @@ class VaultNotes {
 			const next = related.filter((item) => !(item.id === id && item.source_week === sourceWeek));
 			if (next.length === related.length) return;
 			frontmatter.bsn_related_tasks = next;
+			syncRelatedDone(frontmatter, next);
 			frontmatter.last_modified = localStamp();
 		});
 	}
