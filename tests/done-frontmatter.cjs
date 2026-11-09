@@ -15,6 +15,10 @@ vm.runInNewContext(fs.readFileSync('main.js', 'utf8') + '\nmodule.exports.VaultN
   await notes.syncRelatedTask(target, source, entry('one', true, '2026-11-09 12:34:56'));
   assert.equal(fm.done, '2026-11-09 12:34:56');
   assert.equal(fm.bsn_related_tasks[0].done, fm.done);
+  assert.equal(fm.priority, 1);
+  fm.priority = 80;
+  assert.equal(await notes.syncRelatedTask(target, source, entry('one', true, '2026-11-09 12:34:56')), 80);
+  assert.equal(fm.priority, 80);
   delete fm.done; // Existing metadata is backfilled even when the nested record is unchanged.
   await notes.syncRelatedTask(target, source, entry('one', true, '2026-11-09 12:34:56'));
   assert.equal(fm.done, '2026-11-09 12:34:56');

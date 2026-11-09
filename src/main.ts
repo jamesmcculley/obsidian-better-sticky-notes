@@ -19,7 +19,7 @@ const DEFAULT_ROOT = "Better Sticky Notes";
 type Period = "daily" | "weekly";
 type Kind = "task" | "check" | "bullet";
 interface Settings { folder: string }
-interface Entry { line: number; id: string; kind: Kind; text: string; done: boolean; doneDate?: string; externalUrl?: string; metadata?: TaskMetadata }
+interface Entry { line: number; id: string; kind: Kind; text: string; done: boolean; doneDate?: string; externalUrl?: string; metadata?: TaskMetadata; priority?: number }
 interface TaskMetadata {
 	id: string;
 	title: string;
@@ -110,6 +110,14 @@ function markdownBodyStart(lines: string[]): number {
 		if (lines[i].trim() === "---" || lines[i].trim() === "...") return i + 1;
 	}
 	return lines.length;
+}
+
+function taskPriority(value: unknown): number {
+	const number = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+	return Number.isFinite(number) ? Math.max(1, Math.min(100, Math.round(number))) : 1;
+}
+function compareTaskPriority(a: Entry, b: Entry): number {
+	return (b.kind === "bullet" ? 0 : b.priority ?? 1) - (a.kind === "bullet" ? 0 : a.priority ?? 1) || a.line - b.line;
 }
 
 // A linked note exposes the most recent completion among its related tasks.
@@ -308,9 +316,10 @@ class VaultNotes {
 			frontmatter.last_modified = task.last_modified;
 		});
 	}
-	async syncRelatedTask(target: TFile, source: TFile, entry: Entry): Promise<void> {
+	async syncRelatedTask(target: TFile, source: TFile, entry: Entry): Promise<number> {
 		const task = entry.metadata;
-		if (!task) return;
+		if (!task) return 1;
+		let priority = 1;
 		const record: TaskMetadata = {
 			id: entry.id,
 			title: entry.text,
@@ -325,6 +334,8 @@ class VaultNotes {
 		};
 		await this.app.fileManager.processFrontMatter(target, (frontmatter) => {
 			let changed = false;
+			priority = taskPriority(frontmatter.priority);
+			if (frontmatter.priority !== priority) { frontmatter.priority = priority; changed = true; }
 			const related: TaskMetadata[] = Array.isArray(frontmatter.bsn_related_tasks) ? frontmatter.bsn_related_tasks : [];
 			const old = related.find((item) => item.id === entry.id && item.source_week === source.path);
 			if (!old) { related.push(record); changed = true; }
@@ -347,6 +358,7 @@ class VaultNotes {
 			if (!frontmatter.start) frontmatter.start = record.start;
 			if (!frontmatter.last_modified) frontmatter.last_modified = localStamp();
 		});
+		return priority;
 	}
 	async removeRelatedTask(path: string, id: string, sourceWeek: string): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(path);
@@ -397,6 +409,11 @@ export default class BetterStickyNotes extends Plugin {
 		this.addRibbonIcon("checkbox-glyph", "Open Better Sticky Notes", () => void this.activateView());
 		this.addCommand({ id: "open-sticky-notes", name: "Open sticky notes", callback: () => void this.activateView() });
 		this.addSettingTab(new StickySettings(this.app, this));
+		this.registerEvent(this.app.metadataCache.on("changed", (file) => {
+			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+				if (leaf.view instanceof StickyView) leaf.view.updatePriority(file);
+			}
+		}));
 	}
 	async onunload(): Promise<void> { this.app.workspace.detachLeavesOfType(VIEW_TYPE); }
 	async activateView(popout = false): Promise<void> {
@@ -467,9 +484,9 @@ export default class BetterStickyNotes extends Plugin {
 			const targetPath = target && target.path !== source.path ? target.path : undefined;
 			const previousPath = entry.metadata?.related_note;
 			if (previousPath && previousPath !== targetPath) await this.notes.removeRelatedTask(previousPath, entry.id, source.path);
-			if (target && targetPath) await this.notes.syncRelatedTask(target, source, entry);
+			const priority = target && targetPath ? await this.notes.syncRelatedTask(target, source, entry) : 1;
 			if (previousPath !== targetPath) await this.notes.setRelatedNote(source, entry.id, targetPath);
-			results.push({ ...entry, metadata: entry.metadata ? { ...entry.metadata, related_note: targetPath } : undefined });
+			results.push({ ...entry, priority, metadata: entry.metadata ? { ...entry.metadata, related_note: targetPath } : undefined });
 		}
 		return results;
 	}
@@ -604,6 +621,22 @@ export default class BetterStickyNotes extends Plugin {
 class StickyView extends ItemView {
 	private dateInput?: HTMLInputElement;
 	private editingKey?: string;
+	private taskRows: { entry: Entry; row: HTMLElement }[] = [];
+	private taskList?: HTMLElement;
+	private showingLogbook = false;
+	updatePriority(file: TFile): void {
+		if (this.showingLogbook || !this.taskList) return;
+		let changed = false;
+		for (const item of this.taskRows) {
+			if (item.entry.metadata?.related_note !== file.path) continue;
+			const priority = taskPriority(this.app.metadataCache.getFileCache(file)?.frontmatter?.priority);
+			if (item.entry.priority !== priority) { item.entry.priority = priority; changed = true; }
+		}
+		if (!changed) return;
+		this.taskRows.sort((a, b) => compareTaskPriority(a.entry, b.entry));
+		// Move existing rows so live priority edits do not discard an in-progress draft.
+		for (const item of this.taskRows) this.taskList.appendChild(item.row);
+	}
 	constructor(leaf: WorkspaceLeaf, private plugin: BetterStickyNotes) { super(leaf); }
 	getViewType(): string { return VIEW_TYPE; }
 	getDisplayText(): string { return "Better Sticky Notes"; }
@@ -611,6 +644,7 @@ class StickyView extends ItemView {
 	async onOpen(): Promise<void> { await this.render(); }
 	async render(): Promise<void> {
 		const root = this.containerEl.children[1] as HTMLElement;
+		this.taskRows = []; this.taskList = undefined; this.showingLogbook = this.plugin.logbook;
 		root.empty(); root.addClass("bsn-root");
 		const navigator = root.createDiv({ cls: "bsn-navigator" });
 		const previous = navigator.createEl("button", { text: "‹", attr: { "aria-label": "Previous" } });
@@ -631,7 +665,9 @@ class StickyView extends ItemView {
 		let entries = await this.plugin.notes.entries(file);
 		if (!this.plugin.logbook) entries = await this.plugin.syncRelatedTaskDocuments(file, entries);
 		const list = root.createDiv({ cls: "bsn-list" });
-		for (const entry of entries) this.renderEntry(list, file, entry);
+		this.taskList = list;
+		if (!this.plugin.logbook) entries.sort(compareTaskPriority);
+		for (const entry of entries) this.taskRows.push({ entry, row: this.renderEntry(list, file, entry) });
 		if (!this.plugin.logbook) {
 			this.renderTaskInput(root, file);
 		}
@@ -755,7 +791,7 @@ class StickyView extends ItemView {
 			}
 		};
 	}
-	private renderEntry(parent: HTMLElement, file: TFile, entry: Entry): void {
+	private renderEntry(parent: HTMLElement, file: TFile, entry: Entry): HTMLElement {
 		const key = `${file.path}:${entry.line}`;
 		const editing = !this.plugin.logbook && this.editingKey === key;
 		const row = parent.createDiv({ cls: `bsn-entry bsn-${entry.kind}${editing ? " is-editing" : ""}` });
@@ -803,9 +839,9 @@ class StickyView extends ItemView {
 			};
 			if (editing) {
 				const actions = row.createDiv({ cls: "bsn-actions" });
-				const up = actions.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up" } });
+				const up = actions.createEl("button", { text: "↑", cls: "bsn-order", attr: { "aria-label": "Move item up in file order (priority takes precedence)" } });
 				up.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, -1), input);
-				const down = actions.createEl("button", { text: "↓", cls: "bsn-order", attr: { "aria-label": "Move item down" } });
+				const down = actions.createEl("button", { text: "↓", cls: "bsn-order", attr: { "aria-label": "Move item down in file order (priority takes precedence)" } });
 				down.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.reorderEntry(file, current, 1), input);
 				const move = actions.createEl("input", { type: "date", cls: "bsn-move-date", attr: { title: "Move to date" } });
 				move.onchange = () => { if (move.value) void this.runEntryAction(file, entry, (current) => this.plugin.moveEntry(file, current, new Date(`${move.value}T12:00:00`)), input); };
@@ -813,6 +849,7 @@ class StickyView extends ItemView {
 				del.onclick = () => void this.runEntryAction(file, entry, (current) => this.plugin.deleteEntry(file, current), input);
 			}
 		}
+		return row;
 	}
 	private finishEdit(file: TFile, entry: Entry, input: HTMLInputElement, urlInput?: HTMLInputElement): void {
 		const value = input.value.trim();

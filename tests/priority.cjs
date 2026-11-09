@@ -1,0 +1,26 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const context = { module: { exports: {} }, require: () => ({ Plugin: class {}, ItemView: class {}, PluginSettingTab: class {} }) };
+vm.runInNewContext(fs.readFileSync('main.js', 'utf8') + '\nmodule.exports.priority = taskPriority; module.exports.compare = compareTaskPriority; module.exports.View = StickyView;', context);
+const { priority, compare, View } = context.module.exports;
+for (const [value, expected] of [[undefined, 1], [null, 1], ['bad', 1], [NaN, 1], [Infinity, 1], [0, 1], [101, 100], [75.6, 76], ['42', 42], [1, 1], [100, 100]]) assert.equal(priority(value), expected);
+const entry = (line, priority, kind = 'task') => ({ line, priority, kind, metadata: { related_note: `${line}.md` } });
+const entries = [entry(0, 1), entry(1, 90), entry(2, 90), entry(3, 100, 'check'), entry(4, 100, 'bullet')];
+assert.deepEqual([...entries].sort(compare).map(e => e.line), [3, 1, 2, 0, 4]);
+// Live updates move the same row objects, preserving draft controls and source line ids.
+const view = new View({}, {});
+view.app = { metadataCache: { getFileCache: () => ({ frontmatter: { priority: 100 } }) } };
+view.taskRows = entries.map(entry => ({ entry, row: { draft: `draft-${entry.line}` } }));
+const originalRows = new Set(view.taskRows.map(item => item.row));
+const moved = [];
+view.taskList = { appendChild: row => moved.push(row) };
+view.updatePriority({ path: '0.md' });
+assert.deepEqual(view.taskRows.map(item => item.entry.line), [0, 3, 1, 2, 4]);
+assert.equal(moved.length, 5);
+assert.ok(moved.every(row => originalRows.has(row)));
+assert.equal(moved[0].draft, 'draft-0');
+view.updatePriority({ path: '0.md' }); assert.equal(moved.length, 5);
+view.showingLogbook = true;
+view.updatePriority({ path: '1.md' }); assert.equal(moved.length, 5);
+console.log('Priority checks passed: bounds, numeric values, descending order, stable ties, checklists, bullets, live updates, row identity, Logbook exclusion.');
