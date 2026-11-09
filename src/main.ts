@@ -10,6 +10,10 @@ import {
 	WorkspaceLeaf,
 } from "obsidian";
 
+function validNoteTitle(title: string): boolean {
+	return !!title && !/[\\/:*?"<>|#^\[\]\r\n]/.test(title) && !/[. ]$/.test(title) && title !== "." && title !== "..";
+}
+
 const VIEW_TYPE = "better-sticky-notes-view";
 const DEFAULT_ROOT = "Better Sticky Notes";
 type Period = "daily" | "weekly";
@@ -591,19 +595,103 @@ class StickyView extends ItemView {
 		const list = root.createDiv({ cls: "bsn-list" });
 		for (const entry of entries) this.renderEntry(list, file, entry);
 		if (!this.plugin.logbook) {
-			const add = root.createEl("input", { cls: "bsn-add", attr: { placeholder: "Add a task…" } });
-			add.onkeydown = (event) => {
-				if (event.key !== "Enter" || !add.value.trim()) return;
-				const raw = add.value.trim(); add.value = "";
-				const line = raw.startsWith("- [ ] ") || raw.startsWith("- ( ) ") || raw.startsWith("- ") ? raw : `- ( ) ${raw}`;
-				void this.plugin.run(async () => { await this.app.vault.append(file, `${line}\n`); });
-			};
-			add.onblur = () => { if (!add.value.trim()) return; const raw = add.value.trim(); add.value = ""; void this.plugin.run(async () => this.app.vault.append(file, `${raw.startsWith("- ") ? raw : `- ( ) ${raw}`}\n`).then(() => undefined)); };
+			this.renderTaskInput(root, file);
 		}
 		if (this.plugin.lastTrashPath) {
 			const undo = root.createEl("button", { cls: "bsn-undo", text: "Undo delete" });
 			undo.onclick = () => void this.plugin.run(() => this.plugin.undoDelete());
 		}
+	}
+	private renderTaskInput(root: HTMLElement, source: TFile): void {
+		const add = root.createEl("input", { cls: "bsn-add", attr: { placeholder: "Add a task or find a note…", "aria-label": "Add a task or find a note", role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false" } });
+		const suggestions = root.createDiv({ cls: "bsn-suggestions", attr: { role: "listbox", id: `bsn-suggestions-${crypto.randomUUID()}` } });
+		add.setAttribute("aria-controls", suggestions.id);
+		type Choice = { label: string; note?: TFile; create?: boolean };
+		let choices: Choice[] = [];
+		let selected = 0;
+		let busy = false;
+		const parsed = () => {
+			const raw = add.value.trim();
+			const marker = raw.match(/^(- (?:\[ \] |\( \) )?)/)?.[1] ?? "- ( ) ";
+			return { raw, marker, title: raw.startsWith("- ") ? raw.slice(marker.length).trim() : raw };
+		};
+		const close = () => {
+			suggestions.empty(); choices = [];
+			add.setAttribute("aria-expanded", "false");
+			add.removeAttribute("aria-activedescendant");
+		};
+		const highlight = () => {
+			Array.from(suggestions.children).forEach((el, index) => {
+				el.setAttribute("aria-selected", String(index === selected));
+				el.toggleClass("is-selected", index === selected);
+			});
+			const active = suggestions.children[selected];
+			if (active) { add.setAttribute("aria-activedescendant", active.id); active.scrollIntoView({ block: "nearest" }); }
+		};
+		const submit = async (choice: Choice) => {
+			if (busy) return;
+			const { raw, marker, title } = parsed();
+			if (!title) return;
+			busy = true; add.disabled = true;
+			try {
+				let note = choice.note;
+				if (choice.create) {
+					// Recheck immediately before creation in case the vault changed while typing.
+					note = await this.plugin.resolveRelatedDocument(title, source.path);
+					if (!note) {
+						if (!validNoteTitle(title)) throw new Error("Use a note title without slashes, link markers, or filename punctuation.");
+						const parent = this.app.fileManager.getNewFileParent(source.path, `${title}.md`);
+						const path = `${parent.path === "/" ? "" : parent.path + "/"}${title}.md`;
+						const existing = this.app.vault.getAbstractFileByPath(path);
+						if (existing) {
+							if (!(existing instanceof TFile) || existing.extension !== "md") throw new Error("That path already exists.");
+							note = existing;
+						} else note = await this.app.vault.create(path, `# ${title}\n`);
+					}
+				}
+				if (note && this.app.vault.getAbstractFileByPath(note.path) !== note) throw new Error("That note no longer exists. Search again.");
+				const line = note ? `${marker}${this.app.fileManager.generateMarkdownLink(note, source.path)}` : raw.startsWith("- ") ? raw : `${marker}${raw}`;
+				await this.app.vault.process(source, (data) => `${data}${data.endsWith("\n") ? "" : "\n"}${line}\n`);
+				add.value = ""; close();
+				await this.plugin.refreshAll();
+			} catch (error) {
+				new Notice(error instanceof Error ? error.message : "Could not add the task.");
+			} finally { busy = false; add.disabled = false; }
+		};
+		const update = () => {
+			close(); selected = 0;
+			const { title } = parsed();
+			if (!title) return;
+			const query = title.toLocaleLowerCase();
+			const matches = this.app.vault.getMarkdownFiles().filter((note) => note.path.toLocaleLowerCase().includes(query));
+			matches.sort((a, b) => Number(b.basename.toLocaleLowerCase() === query) - Number(a.basename.toLocaleLowerCase() === query) || Number(b.basename.toLocaleLowerCase().startsWith(query)) - Number(a.basename.toLocaleLowerCase().startsWith(query)) || a.path.localeCompare(b.path));
+			choices = matches.slice(0, 8).map((note) => ({ label: `${note.basename} — ${note.path}`, note }));
+			if (!matches.some((note) => note.basename.toLocaleLowerCase() === query) && validNoteTitle(title)) choices.push({ label: `Create note “${title}” and add task`, create: true });
+			choices.push({ label: `Add task only: ${title}` });
+			choices.forEach((choice, index) => {
+				const option = suggestions.createDiv({ cls: "bsn-suggestion", text: choice.label, attr: { role: "option", id: `${suggestions.id}-${index}` } });
+				option.onpointerdown = (event) => event.preventDefault();
+				option.onclick = () => void submit(choice);
+			});
+			add.setAttribute("aria-expanded", "true"); highlight();
+		};
+		add.oninput = update;
+		add.onfocus = update;
+		add.onblur = close;
+		add.onkeydown = (event) => {
+			if (event.isComposing) return;
+			if (event.key === "Escape") { event.preventDefault(); close(); }
+			else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+				event.preventDefault();
+				if (!choices.length) { update(); return; }
+				selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+				highlight();
+			} else if (event.key === "Enter") {
+				event.preventDefault();
+				if (choices[selected]) void submit(choices[selected]);
+				else update();
+			}
+		};
 	}
 	private renderEntry(parent: HTMLElement, file: TFile, entry: Entry): void {
 		const key = `${file.path}:${entry.line}`;

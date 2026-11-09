@@ -198,3 +198,22 @@
 	.bsn-navigator button { padding-inline: 5px; }
 	.bsn-move-date { width: 32px; }
 }
+
+.bsn-suggestions:empty { display: none; }
+.bsn-suggestions {
+	max-height: 260px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--bsn-radius);
+	background: var(--background-primary);
+}
+.bsn-suggestion {
+	padding: 10px;
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+.bsn-suggestion:hover,
+.bsn-suggestion.is-selected {
+	background: var(--background-modifier-hover);
+	color: var(--text-accent);
+}
