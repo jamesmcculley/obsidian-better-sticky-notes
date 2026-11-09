@@ -119,7 +119,19 @@ class VaultNotes {
 		let built = "";
 		for (const part of path.split("/")) {
 			built = built ? `${built}/${part}` : part;
-			if (!this.app.vault.getAbstractFileByPath(built)) await this.app.vault.createFolder(built);
+			// Hidden folders such as .trash are not reliably present in the vault index.
+			const existing = await this.app.vault.adapter.stat(built);
+			if (existing) {
+				if (existing.type !== "folder") throw new Error(`A file blocks the folder: ${built}`);
+				continue;
+			}
+			try {
+				if (built.split("/").some((part) => part.startsWith("."))) await this.app.vault.adapter.mkdir(built);
+				else await this.app.vault.createFolder(built);
+			} catch (error) {
+				// Another view may have created the same directory while we awaited I/O.
+				if ((await this.app.vault.adapter.stat(built))?.type !== "folder") throw error;
+			}
 		}
 	}
 	async ensureNote(period: Period, date: Date): Promise<TFile> {
@@ -529,7 +541,7 @@ export default class BetterStickyNotes extends Plugin {
 		const trashFolder = `${this.settings.folder}/.trash`;
 		await this.notes.ensureFolder(trashFolder);
 		const path = `${trashFolder}/${Date.now()}-${file.basename}-${entry.line}.json`;
-		await this.app.vault.create(path, JSON.stringify({ path: file.path, line: entry.line, content: await this.app.vault.read(file).then((v) => v.split("\n")[entry.line]) }, null, 2));
+		await this.app.vault.adapter.write(path, JSON.stringify({ path: file.path, line: entry.line, content: await this.app.vault.read(file).then((v) => v.split("\n")[entry.line]) }, null, 2));
 		await this.app.vault.process(file, (data) => {
 			const lines = data.split("\n");
 			if (!sameEntry(parseLine(lines[entry.line] ?? "", entry.line), entry)) throw new Error("This note changed outside the plugin. The deleted item is saved in Trash.");
@@ -541,15 +553,15 @@ export default class BetterStickyNotes extends Plugin {
 	}
 	async undoDelete(): Promise<void> {
 		if (!this.lastTrashPath) return;
-		const trashFile = this.app.vault.getAbstractFileByPath(this.lastTrashPath);
-		if (!(trashFile instanceof TFile)) throw new Error("No recent deleted item is available to restore.");
-		const record = JSON.parse(await this.app.vault.read(trashFile)) as { path: string; line: number; content: string };
+		const trashPath = this.lastTrashPath;
+		if ((await this.app.vault.adapter.stat(trashPath))?.type !== "file") throw new Error("No recent deleted item is available to restore.");
+		const record = JSON.parse(await this.app.vault.adapter.read(trashPath)) as { path: string; line: number; content: string };
 		const original = this.app.vault.getAbstractFileByPath(record.path);
 		if (!(original instanceof TFile)) throw new Error("The original note no longer exists.");
 		await this.app.vault.process(original, (data) => {
 			const lines = data.split("\n"); lines.splice(Math.min(record.line, lines.length), 0, record.content); return lines.join("\n");
 		});
-		await this.app.vault.delete(trashFile);
+		await this.app.vault.adapter.remove(trashPath);
 		this.lastTrashPath = undefined;
 	}
 	async moveEntry(file: TFile, entry: Entry, date: Date): Promise<void> {
@@ -604,6 +616,12 @@ class StickyView extends ItemView {
 	}
 	private renderTaskInput(root: HTMLElement, source: TFile): void {
 		const add = root.createEl("input", { cls: "bsn-add", attr: { placeholder: "Add a task or find a note…", "aria-label": "Add a task or find a note", role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false" } });
+		this.attachNoteSuggestions(root, source, add);
+	}
+	private attachNoteSuggestions(root: HTMLElement, source: TFile, add: HTMLInputElement, edit?: { entry: Entry; urlInput: HTMLInputElement }): void {
+		add.setAttribute("role", "combobox");
+		add.setAttribute("aria-autocomplete", "list");
+		add.setAttribute("aria-expanded", "false");
 		const suggestions = root.createDiv({ cls: "bsn-suggestions", attr: { role: "listbox", id: `bsn-suggestions-${crypto.randomUUID()}` } });
 		add.setAttribute("aria-controls", suggestions.id);
 		type Choice = { label: string; note?: TFile; create?: boolean };
@@ -612,6 +630,7 @@ class StickyView extends ItemView {
 		let busy = false;
 		const parsed = () => {
 			const raw = add.value.trim();
+			if (edit) return { raw, marker: "", title: displayEntryText(raw) };
 			const marker = raw.match(/^(- (?:\[ \] |\( \) )?)/)?.[1] ?? "- ( ) ";
 			return { raw, marker, title: raw.startsWith("- ") ? raw.slice(marker.length).trim() : raw };
 		};
@@ -634,6 +653,12 @@ class StickyView extends ItemView {
 			if (!title) return;
 			busy = true; add.disabled = true;
 			try {
+				const externalUrl = edit?.urlInput.value.trim() ?? "";
+				if (edit) {
+					if (externalUrl && !isSafeExternalURL(externalUrl)) throw new Error("Use an http:// or https:// link.");
+					const lines = (await this.app.vault.read(source)).split("\n");
+					if (!sameEntry(parseLine(lines[edit.entry.line] ?? "", edit.entry.line), edit.entry)) throw new Error("This note changed outside the plugin. Refresh and try again.");
+				}
 				let note = choice.note;
 				if (choice.create) {
 					// Recheck immediately before creation in case the vault changed while typing.
@@ -650,12 +675,18 @@ class StickyView extends ItemView {
 					}
 				}
 				if (note && this.app.vault.getAbstractFileByPath(note.path) !== note) throw new Error("That note no longer exists. Search again.");
-				const line = note ? `${marker}${this.app.fileManager.generateMarkdownLink(note, source.path)}` : raw.startsWith("- ") ? raw : `${marker}${raw}`;
-				await this.app.vault.process(source, (data) => `${data}${data.endsWith("\n") ? "" : "\n"}${line}\n`);
+				const value = note ? this.app.fileManager.generateMarkdownLink(note, source.path) : raw;
+				if (edit) {
+					await this.plugin.editEntry(source, edit.entry, value, externalUrl);
+					this.editingKey = undefined;
+				} else {
+					const line = note ? `${marker}${value}` : raw.startsWith("- ") ? raw : `${marker}${raw}`;
+					await this.app.vault.process(source, (data) => `${data}${data.endsWith("\n") ? "" : "\n"}${line}\n`);
+				}
 				add.value = ""; close();
 				await this.plugin.refreshAll();
 			} catch (error) {
-				new Notice(error instanceof Error ? error.message : "Could not add the task.");
+				new Notice(error instanceof Error ? error.message : "Could not save the task.");
 			} finally { busy = false; add.disabled = false; }
 		};
 		const update = () => {
@@ -666,8 +697,8 @@ class StickyView extends ItemView {
 			const matches = this.app.vault.getMarkdownFiles().filter((note) => note.path.toLocaleLowerCase().includes(query));
 			matches.sort((a, b) => Number(b.basename.toLocaleLowerCase() === query) - Number(a.basename.toLocaleLowerCase() === query) || Number(b.basename.toLocaleLowerCase().startsWith(query)) - Number(a.basename.toLocaleLowerCase().startsWith(query)) || a.path.localeCompare(b.path));
 			choices = matches.slice(0, 8).map((note) => ({ label: `${note.basename} — ${note.path}`, note }));
-			if (!matches.some((note) => note.basename.toLocaleLowerCase() === query) && validNoteTitle(title)) choices.push({ label: `Create note “${title}” and add task`, create: true });
-			choices.push({ label: `Add task only: ${title}` });
+			if (!matches.some((note) => note.basename.toLocaleLowerCase() === query) && validNoteTitle(title)) choices.push({ label: `Create note “${title}” and ${edit ? "update" : "add"} task`, create: true });
+			choices.push({ label: `${edit ? "Save text only" : "Add task only"}: ${title}` });
 			choices.forEach((choice, index) => {
 				const option = suggestions.createDiv({ cls: "bsn-suggestion", text: choice.label, attr: { role: "option", id: `${suggestions.id}-${index}` } });
 				option.onpointerdown = (event) => event.preventDefault();
@@ -680,7 +711,11 @@ class StickyView extends ItemView {
 		add.onblur = close;
 		add.onkeydown = (event) => {
 			if (event.isComposing) return;
-			if (event.key === "Escape") { event.preventDefault(); close(); }
+			if (event.key === "Escape") {
+				event.preventDefault();
+				if (!choices.length && edit) { this.editingKey = undefined; void this.render(); }
+				else close();
+			}
 			else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 				event.preventDefault();
 				if (!choices.length) { update(); return; }
@@ -689,6 +724,7 @@ class StickyView extends ItemView {
 			} else if (event.key === "Enter") {
 				event.preventDefault();
 				if (choices[selected]) void submit(choices[selected]);
+				else if (edit) void submit({ label: "Save text only" });
 				else update();
 			}
 		};
@@ -709,10 +745,8 @@ class StickyView extends ItemView {
 			input.value = entry.text;
 			const urlInput = fields.createEl("input", { cls: "bsn-url-edit", type: "url", attr: { placeholder: "External URL (optional)" } });
 			urlInput.value = entry.externalUrl ?? "";
-			input.onkeydown = (event) => {
-				if (event.key === "Enter") { event.preventDefault(); this.finishEdit(file, entry, input!, urlInput); }
-				if (event.key === "Escape") { input!.value = entry.text; this.editingKey = undefined; void this.render(); }
-			};
+			input.setAttribute("aria-label", "Edit task or find a note");
+			this.attachNoteSuggestions(fields, file, input, { entry, urlInput });
 			urlInput.onkeydown = (event) => {
 				if (event.key === "Enter") { event.preventDefault(); this.finishEdit(file, entry, input!, urlInput); }
 				if (event.key === "Escape") { this.editingKey = undefined; void this.render(); }

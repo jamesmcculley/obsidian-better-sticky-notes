@@ -114,10 +114,21 @@ var VaultNotes = class {
     return `${this.getRoot()}/${stack}/${id}`;
   }
   async ensureFolder(path) {
+    var _a;
     let built = "";
     for (const part of path.split("/")) {
       built = built ? `${built}/${part}` : part;
-      if (!this.app.vault.getAbstractFileByPath(built)) await this.app.vault.createFolder(built);
+      const existing = await this.app.vault.adapter.stat(built);
+      if (existing) {
+        if (existing.type !== "folder") throw new Error(`A file blocks the folder: ${built}`);
+        continue;
+      }
+      try {
+        if (built.split("/").some((part2) => part2.startsWith("."))) await this.app.vault.adapter.mkdir(built);
+        else await this.app.vault.createFolder(built);
+      } catch (error) {
+        if (((_a = await this.app.vault.adapter.stat(built)) == null ? void 0 : _a.type) !== "folder") throw error;
+      }
     }
   }
   async ensureNote(period, date) {
@@ -596,7 +607,7 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     const trashFolder = `${this.settings.folder}/.trash`;
     await this.notes.ensureFolder(trashFolder);
     const path = `${trashFolder}/${Date.now()}-${file.basename}-${entry.line}.json`;
-    await this.app.vault.create(path, JSON.stringify({ path: file.path, line: entry.line, content: await this.app.vault.read(file).then((v) => v.split("\n")[entry.line]) }, null, 2));
+    await this.app.vault.adapter.write(path, JSON.stringify({ path: file.path, line: entry.line, content: await this.app.vault.read(file).then((v) => v.split("\n")[entry.line]) }, null, 2));
     await this.app.vault.process(file, (data) => {
       var _a2;
       const lines = data.split("\n");
@@ -608,10 +619,11 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     if ((_a = entry.metadata) == null ? void 0 : _a.related_note) await this.notes.removeRelatedTask(entry.metadata.related_note, entry.id, file.path);
   }
   async undoDelete() {
+    var _a;
     if (!this.lastTrashPath) return;
-    const trashFile = this.app.vault.getAbstractFileByPath(this.lastTrashPath);
-    if (!(trashFile instanceof import_obsidian.TFile)) throw new Error("No recent deleted item is available to restore.");
-    const record = JSON.parse(await this.app.vault.read(trashFile));
+    const trashPath = this.lastTrashPath;
+    if (((_a = await this.app.vault.adapter.stat(trashPath)) == null ? void 0 : _a.type) !== "file") throw new Error("No recent deleted item is available to restore.");
+    const record = JSON.parse(await this.app.vault.adapter.read(trashPath));
     const original = this.app.vault.getAbstractFileByPath(record.path);
     if (!(original instanceof import_obsidian.TFile)) throw new Error("The original note no longer exists.");
     await this.app.vault.process(original, (data) => {
@@ -619,7 +631,7 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
       lines.splice(Math.min(record.line, lines.length), 0, record.content);
       return lines.join("\n");
     });
-    await this.app.vault.delete(trashFile);
+    await this.app.vault.adapter.remove(trashPath);
     this.lastTrashPath = void 0;
   }
   async moveEntry(file, entry, date) {
@@ -706,6 +718,12 @@ var StickyView = class extends import_obsidian.ItemView {
   }
   renderTaskInput(root, source) {
     const add = root.createEl("input", { cls: "bsn-add", attr: { placeholder: "Add a task or find a note\u2026", "aria-label": "Add a task or find a note", role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false" } });
+    this.attachNoteSuggestions(root, source, add);
+  }
+  attachNoteSuggestions(root, source, add, edit) {
+    add.setAttribute("role", "combobox");
+    add.setAttribute("aria-autocomplete", "list");
+    add.setAttribute("aria-expanded", "false");
     const suggestions = root.createDiv({ cls: "bsn-suggestions", attr: { role: "listbox", id: `bsn-suggestions-${crypto.randomUUID()}` } });
     add.setAttribute("aria-controls", suggestions.id);
     let choices = [];
@@ -714,6 +732,7 @@ var StickyView = class extends import_obsidian.ItemView {
     const parsed = () => {
       var _a, _b;
       const raw = add.value.trim();
+      if (edit) return { raw, marker: "", title: displayEntryText(raw) };
       const marker = (_b = (_a = raw.match(/^(- (?:\[ \] |\( \) )?)/)) == null ? void 0 : _a[1]) != null ? _b : "- ( ) ";
       return { raw, marker, title: raw.startsWith("- ") ? raw.slice(marker.length).trim() : raw };
     };
@@ -735,12 +754,19 @@ var StickyView = class extends import_obsidian.ItemView {
       }
     };
     const submit = async (choice) => {
+      var _a, _b;
       if (busy) return;
       const { raw, marker, title } = parsed();
       if (!title) return;
       busy = true;
       add.disabled = true;
       try {
+        const externalUrl = (_a = edit == null ? void 0 : edit.urlInput.value.trim()) != null ? _a : "";
+        if (edit) {
+          if (externalUrl && !isSafeExternalURL(externalUrl)) throw new Error("Use an http:// or https:// link.");
+          const lines = (await this.app.vault.read(source)).split("\n");
+          if (!sameEntry(parseLine((_b = lines[edit.entry.line]) != null ? _b : "", edit.entry.line), edit.entry)) throw new Error("This note changed outside the plugin. Refresh and try again.");
+        }
         let note = choice.note;
         if (choice.create) {
           note = await this.plugin.resolveRelatedDocument(title, source.path);
@@ -757,14 +783,20 @@ var StickyView = class extends import_obsidian.ItemView {
           }
         }
         if (note && this.app.vault.getAbstractFileByPath(note.path) !== note) throw new Error("That note no longer exists. Search again.");
-        const line = note ? `${marker}${this.app.fileManager.generateMarkdownLink(note, source.path)}` : raw.startsWith("- ") ? raw : `${marker}${raw}`;
-        await this.app.vault.process(source, (data) => `${data}${data.endsWith("\n") ? "" : "\n"}${line}
+        const value = note ? this.app.fileManager.generateMarkdownLink(note, source.path) : raw;
+        if (edit) {
+          await this.plugin.editEntry(source, edit.entry, value, externalUrl);
+          this.editingKey = void 0;
+        } else {
+          const line = note ? `${marker}${value}` : raw.startsWith("- ") ? raw : `${marker}${raw}`;
+          await this.app.vault.process(source, (data) => `${data}${data.endsWith("\n") ? "" : "\n"}${line}
 `);
+        }
         add.value = "";
         close();
         await this.plugin.refreshAll();
       } catch (error) {
-        new import_obsidian.Notice(error instanceof Error ? error.message : "Could not add the task.");
+        new import_obsidian.Notice(error instanceof Error ? error.message : "Could not save the task.");
       } finally {
         busy = false;
         add.disabled = false;
@@ -779,8 +811,8 @@ var StickyView = class extends import_obsidian.ItemView {
       const matches = this.app.vault.getMarkdownFiles().filter((note) => note.path.toLocaleLowerCase().includes(query));
       matches.sort((a, b) => Number(b.basename.toLocaleLowerCase() === query) - Number(a.basename.toLocaleLowerCase() === query) || Number(b.basename.toLocaleLowerCase().startsWith(query)) - Number(a.basename.toLocaleLowerCase().startsWith(query)) || a.path.localeCompare(b.path));
       choices = matches.slice(0, 8).map((note) => ({ label: `${note.basename} \u2014 ${note.path}`, note }));
-      if (!matches.some((note) => note.basename.toLocaleLowerCase() === query) && validNoteTitle(title)) choices.push({ label: `Create note \u201C${title}\u201D and add task`, create: true });
-      choices.push({ label: `Add task only: ${title}` });
+      if (!matches.some((note) => note.basename.toLocaleLowerCase() === query) && validNoteTitle(title)) choices.push({ label: `Create note \u201C${title}\u201D and ${edit ? "update" : "add"} task`, create: true });
+      choices.push({ label: `${edit ? "Save text only" : "Add task only"}: ${title}` });
       choices.forEach((choice, index) => {
         const option = suggestions.createDiv({ cls: "bsn-suggestion", text: choice.label, attr: { role: "option", id: `${suggestions.id}-${index}` } });
         option.onpointerdown = (event) => event.preventDefault();
@@ -796,7 +828,10 @@ var StickyView = class extends import_obsidian.ItemView {
       if (event.isComposing) return;
       if (event.key === "Escape") {
         event.preventDefault();
-        close();
+        if (!choices.length && edit) {
+          this.editingKey = void 0;
+          void this.render();
+        } else close();
       } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         if (!choices.length) {
@@ -808,6 +843,7 @@ var StickyView = class extends import_obsidian.ItemView {
       } else if (event.key === "Enter") {
         event.preventDefault();
         if (choices[selected]) void submit(choices[selected]);
+        else if (edit) void submit({ label: "Save text only" });
         else update();
       }
     };
@@ -830,17 +866,8 @@ var StickyView = class extends import_obsidian.ItemView {
       input.value = entry.text;
       const urlInput = fields.createEl("input", { cls: "bsn-url-edit", type: "url", attr: { placeholder: "External URL (optional)" } });
       urlInput.value = (_a = entry.externalUrl) != null ? _a : "";
-      input.onkeydown = (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          this.finishEdit(file, entry, input, urlInput);
-        }
-        if (event.key === "Escape") {
-          input.value = entry.text;
-          this.editingKey = void 0;
-          void this.render();
-        }
-      };
+      input.setAttribute("aria-label", "Edit task or find a note");
+      this.attachNoteSuggestions(fields, file, input, { entry, urlInput });
       urlInput.onkeydown = (event) => {
         if (event.key === "Enter") {
           event.preventDefault();
