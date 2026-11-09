@@ -479,7 +479,14 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     var _a, _b;
     const wiki = text.match(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/);
     const markdown = text.match(/\[[^\]]+\]\(([^)#]+)(?:#[^)]+)?\)/);
-    const target = ((_b = (_a = wiki == null ? void 0 : wiki[1]) != null ? _a : markdown == null ? void 0 : markdown[1]) != null ? _b : text).trim();
+    let target = ((_b = (_a = wiki == null ? void 0 : wiki[1]) != null ? _a : markdown == null ? void 0 : markdown[1]) != null ? _b : text).trim();
+    if (markdown && !wiki) {
+      if (target.startsWith("<") && target.endsWith(">")) target = target.slice(1, -1);
+      try {
+        target = decodeURIComponent(target);
+      } catch (e) {
+      }
+    }
     if (!target || /^[a-z][a-z\d+.-]*:\/\//i.test(target)) return void 0;
     const normalize = (value) => value.replace(/\\/g, "/").replace(/\.md$/i, "").trim().toLocaleLowerCase();
     let destination = this.app.metadataCache.getFirstLinkpathDest(target, sourcePath);
@@ -564,6 +571,7 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
     if (!entry.done) {
       const stamp = localStamp();
       await this.notes.updateLine(file, entry, (line) => encodeEntry(entry, entry.text, true, stamp));
+      await this.syncCompletedTask(file, entry);
       const log = await this.notes.getLogbook();
       const label = `${entry.text} \u2014 ${await this.notes.title(file)}`;
       const marker = entry.kind === "task" ? "(x)" : "[x]";
@@ -571,8 +579,15 @@ var BetterStickyNotes = class extends import_obsidian.Plugin {
 `);
     } else {
       await this.notes.updateLine(file, entry, () => encodeEntry(entry, entry.text, false));
+      await this.syncCompletedTask(file, entry);
       if (entry.doneDate) await this.removeLogbook(entry.text, await this.notes.title(file), entry.doneDate);
     }
+  }
+  async syncCompletedTask(file, entry) {
+    const entries = await this.notes.entries(file);
+    const current = entries.find((item) => entry.id ? item.id === entry.id : item.line === entry.line);
+    if (!current) throw new Error("Task saved, but its linked note could not be updated. Refresh and try again.");
+    await this.syncRelatedTaskDocuments(file, [current]);
   }
   async removeLogbook(text, source, stamp) {
     const log = await this.notes.getLogbook();
